@@ -99,7 +99,7 @@ export class CodexDesktopIpcBridge {
   private usageSnapshot?: UsageSnapshot;
 
   constructor(private log: (message: string) => void, options: Partial<Options> = {},
-    private readonly usageReader: Pick<CodexAppServerUsageReader, "read" | "close"> = new CodexAppServerUsageReader()) {
+    private readonly usageReader: Pick<CodexAppServerUsageReader, "read" | "close"> = new CodexAppServerUsageReader({ log })) {
     this.options = { socketPath: join(ROOT, "ipc", "ipc.sock"), readThreads: readRecentThreads,
       verifyApp: verifyCodexApp, ...options };
   }

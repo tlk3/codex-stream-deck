@@ -78,6 +78,28 @@ test("reader sends only initialization and read-only usage RPCs and closes its o
   reader.close();
 });
 
+test("usage diagnostics report availability transitions without account data or repeated failures", async () => {
+  const logs: string[] = [];
+  let healthy = false;
+  const reader = new CodexAppServerUsageReader({
+    log: message => logs.push(message),
+    spawnChild: () => fakeServer(healthy ? normalReply : (request, child) => {
+      child.reply({ id: request.id, error: { message: "private-account-detail" } });
+    }).asChild()
+  });
+  await reader.read(true).catch(() => {});
+  await reader.read(true).catch(() => {});
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /unavailable/i);
+  assert.ok(!logs.join().includes("private-account-detail"));
+  healthy = true;
+  await reader.read(true);
+  assert.equal(logs.length, 2);
+  assert.match(logs[1]!, /available.*weekly/i);
+  assert.ok(!logs.join().includes("test-account"));
+  reader.close();
+});
+
 test("reader coalesces requests, caches for 30 seconds, and discards failed stale data", async () => {
   let now = 1000;
   let count = 0;

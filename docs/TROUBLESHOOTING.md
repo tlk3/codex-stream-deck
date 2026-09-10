@@ -30,7 +30,25 @@ tail -n 100 "$HOME/Library/Application Support/CodexDeck/watcher.log"
 
 Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existing normal session needs a restart, it waits for your explicit `yes`.
 
-The installed watcher never launches Codex while it is closed. After you open Codex manually, one controlled recovery restart can occur if the new process lacks the loopback bridge. A global cooldown prevents further automatic restarts across replacement PIDs.
+The installed macOS watcher never launches a closed Codex app or automatically
+restarts a running one. Normal launches can provide recent task status/navigation
+and account usage through the [normal-launch fallback](DESKTOP_IPC.md), but not
+Model Preset or native Action controls. Those still need a renderer-enabled
+session, requested explicitly when it is safe to restart Codex.
+
+## Dials show Unavailable although task status works
+
+`local=ready` means the task transport is connected, not that every desktop
+control is supported. Model Preset, native Actions, FAST, TERM and DIFF require
+the renderer connection; reloading Stream Deck cannot add it to a normal Codex
+launch. The fallback is partial support, not a permanent replacement for that
+connection.
+
+For Usage, select **Auto** or **Weekly** if the account reports no five-hour
+window. Missing windows intentionally show unavailable. Plugin logs now report
+`Codex account usage available (weekly).` or a redacted failure stage, separately
+from task transport health. This confirms data retrieval, not the physical LCD;
+check the selected window and displayed feedback as well.
 
 If an older watcher is repeatedly relaunching Codex after a crash or empty battery, stop only that watcher first:
 

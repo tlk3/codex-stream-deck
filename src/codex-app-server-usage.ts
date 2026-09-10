@@ -2,6 +2,7 @@ import type { UsageSnapshot, UsageWindow } from "./types.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 type ReaderOptions = {
+  log?: (message: string) => void;
   spawnChild?: (executable: string, args: string[]) => ChildProcessWithoutNullStreams;
   now?: () => number;
   timeoutMs?: number;
@@ -12,6 +13,7 @@ export class CodexAppServerUsageReader {
   private pending?: Promise<UsageSnapshot>;
   private lastAttempt = -Infinity;
   private generation = 0;
+  private lastDiagnostic?: string;
   private cancel?: () => void;
   private readonly now: () => number;
 
@@ -25,10 +27,17 @@ export class CodexAppServerUsageReader {
       this.lastAttempt = this.now();
       const generation = this.generation;
       const pending = this.query().then((usage) => {
-        if (this.generation === generation) this.cached = usage;
+        if (this.generation === generation) {
+          this.cached = usage;
+          this.diagnose(`Codex account usage available (${usage.windows.map(window => window.kind).join(", ")}).`);
+        }
         return usage;
       }, (error: unknown) => {
-        if (this.generation === generation) this.cached = undefined;
+        if (this.generation === generation) {
+          this.cached = undefined;
+          // query produces only fixed, redacted errors, never raw server text.
+          this.diagnose(`Codex account usage unavailable: ${error instanceof Error ? error.message : "read failed"}`);
+        }
         throw error;
       }).finally(() => { if (this.pending === pending) this.pending = undefined; });
       this.pending = pending;
@@ -43,6 +52,12 @@ export class CodexAppServerUsageReader {
     this.cancel?.();
     this.pending = undefined;
     this.lastAttempt = -Infinity;
+  }
+
+  private diagnose(message: string): void {
+    if (message === this.lastDiagnostic) return;
+    this.lastDiagnostic = message;
+    try { this.options.log?.(message); } catch {}
   }
 
   private query(): Promise<UsageSnapshot> {
