@@ -5,7 +5,8 @@ import net from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import type { MicroSnapshot } from "./types.js";
+import type { MicroSnapshot, UsageSnapshot } from "./types.js";
+import { CodexAppServerUsageReader } from "./codex-app-server-usage.js";
 
 const exec = promisify(execFile);
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -14,6 +15,7 @@ const ROOT = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 type Thread = { id: string; title: string; activityAt: number };
 type Live = { title: string; status: string; revision: number; owner: string; state: Record<string, any> };
 type Options = { socketPath: string; readThreads: () => Promise<Thread[]>; verifyApp: () => Promise<void> };
+export class DesktopUsageUnavailableError extends Error {}
 
 export function encodeIpcFrame(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message));
@@ -94,13 +96,15 @@ export class CodexDesktopIpcBridge {
   private pending = new Map<string, { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private options: Options;
   private blockedUntil = 0;
+  private usageSnapshot?: UsageSnapshot;
 
-  constructor(private log: (message: string) => void, options: Partial<Options> = {}) {
+  constructor(private log: (message: string) => void, options: Partial<Options> = {},
+    private readonly usageReader: Pick<CodexAppServerUsageReader, "read" | "close"> = new CodexAppServerUsageReader()) {
     this.options = { socketPath: join(ROOT, "ipc", "ipc.sock"), readThreads: readRecentThreads,
       verifyApp: verifyCodexApp, ...options };
   }
 
-  async refresh(): Promise<MicroSnapshot> {
+  async refresh(forceUsageRefresh = false): Promise<MicroSnapshot> {
     await this.options.verifyApp();
     const threads = await this.options.readThreads();
     if (threads.length > 6 || threads.some(t => !UUID.test(t.id))) throw new Error("Invalid Codex IPC task list");
@@ -120,7 +124,30 @@ export class CodexDesktopIpcBridge {
     // A second ordered round-trip lets promptly returned initial snapshots arrive without a fixed sleep.
     if (requested) await this.initialize();
     if (!this.socket || this.socket.destroyed) throw new Error("Codex IPC disconnected");
+    // Usage is independent of renderer/composer authority. Failure of the optional
+    // automatic read must not take working task status offline.
+    let usage = this.usageSnapshot && Date.now() - this.usageSnapshot.observedAt < 30000 ? this.usageSnapshot : undefined;
+    if (forceUsageRefresh) {
+      const socket = this.socket;
+      try {
+        usage = await this.usageReader.read(true);
+        if (this.socket !== socket || socket.destroyed) throw new Error("Codex IPC disconnected");
+        if (!usage) throw new Error("missing usage");
+        this.usageSnapshot = usage;
+      } catch {
+        this.usageSnapshot = undefined;
+        if (this.socket !== socket || socket.destroyed) throw new Error("Codex IPC disconnected");
+        throw new DesktopUsageUnavailableError("Codex usage read failed; task status remains connected.");
+      }
+    } else {
+      const socket = this.socket;
+      // Account HTTP latency must not stall task-status polling.
+      void this.usageReader.read().then(result => {
+        if (this.socket === socket && !socket?.destroyed) this.usageSnapshot = result;
+      }, () => { if (this.socket === socket) this.usageSnapshot = undefined; });
+    }
     return {
+      ...(usage ? { usage } : {}),
       transport: "desktop-ipc", agentSource: "recent", lightingAutoOff: "never", theme: "dark",
       layout: { version: 1, slots: {
         ACT06: { keycapId: "UNAVAILABLE" }, ACT07: { keycapId: "UNAVAILABLE" },
@@ -137,6 +164,8 @@ export class CodexDesktopIpcBridge {
   }
 
   close(): void {
+    this.usageSnapshot = undefined;
+    this.usageReader.close();
     const socket = this.socket; this.socket = undefined; this.clientId = undefined;
     this.live.clear(); this.subscribed.clear(); this.requestedAt.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("Codex IPC disconnected")); }

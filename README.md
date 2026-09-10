@@ -164,7 +164,7 @@ The current build was locally validated against:
 
 The Windows physical-device path and the Windows+Mac relay were exercised on the real setup. The macOS launcher, watcher, native bridge, and plugin package are validated; a Stream Deck physically attached to the Mac has not yet been hardware-tested. These are tested versions, not strict maximums.
 
-Normal macOS launches also support an [IPC task-status and navigation fallback](docs/DESKTOP_IPC.md), without debug flags or a Codex restart. Composer/native action controls still require the renderer bridge; the fallback does not claim full control parity.
+Normal macOS launches also support [task status, navigation, and account usage](docs/DESKTOP_IPC.md), without debug flags or a Codex restart. Usage is read through the bundled CLI, independently of task status; missing account windows remain unavailable. Composer/native action controls still require the renderer bridge; the fallback does not claim full control parity.
 
 ## Troubleshooting
 

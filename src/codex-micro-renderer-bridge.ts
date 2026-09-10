@@ -1324,8 +1324,10 @@ export class CodexMicroRendererBridge {
     try { await this.ensureConnected(); }
     catch (error) {
       if (!this.desktopBridge) throw error;
-      if (forceUsageRefresh) throw new Error("Usage refresh requires the Codex renderer connection; task status is still available.");
-      const snapshot = await this.desktopBridge.refresh();
+      const snapshot = await this.desktopBridge.refresh(forceUsageRefresh);
+      if (forceUsageRefresh && !hasValidNormalizedUsage(snapshot.usage)) {
+        throw new Error("Codex usage refresh returned no valid rate-limit usage.");
+      }
       this.lastSnapshot = snapshot;
       return snapshot;
     }

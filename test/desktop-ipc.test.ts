@@ -56,7 +56,7 @@ test("normal-launch IPC supplies live slots and clears them on disconnect; recon
   await new Promise<void>(resolve => server.listen(path, resolve));
   const bridge = new CodexDesktopIpcBridge(() => {}, { socketPath: path,
     readThreads: async () => [{ id: threadId, title: "Stored task", activityAt: 100 }],
-    verifyApp: async () => {} });
+    verifyApp: async () => {} }, { read: async () => undefined, close() {} });
   try {
     const snapshot = await bridge.refresh();
     assert.equal(snapshot.slots[0]?.status, "working");
@@ -97,14 +97,30 @@ test("renderer bridge uses IPC only when the normal-launch renderer connection i
   internals.ensureConnected = async () => { throw new DebugBridgeUnavailableError("normal launch"); };
   assert.equal(await bridge.refresh(), snapshot);
   assert.equal(refreshes, 1);
-  await assert.rejects(bridge.requestUsageRefresh(), /Usage refresh requires/);
-  assert.equal(refreshes, 1);
+  await assert.rejects(bridge.requestUsageRefresh(), /no valid rate-limit usage/);
+  assert.equal(refreshes, 2);
   internals.ensureConnected = async () => { throw new Error("page unavailable during relaunch"); };
   assert.equal(await bridge.refresh(), snapshot);
-  assert.equal(refreshes, 2);
+  assert.equal(refreshes, 3);
   internals.ensureConnected = async () => {};
   internals.evaluate = async () => { throw new Error("unexpected transport failure"); };
   await assert.rejects(bridge.refresh(), /unexpected transport failure/);
-  assert.equal(refreshes, 2, "renderer execution errors are not silently hidden");
+  assert.equal(refreshes, 3, "renderer execution errors are not silently hidden");
+  bridge.close();
+});
+
+test("explicit usage refresh routes through the IPC fallback", async () => {
+  let forced: boolean | undefined;
+  const snapshot = { transport: "desktop-ipc", usage: {
+    observedAt: 100, resetCreditsAvailable: null, resetCreditsApplicable: null,
+    windows: [{ id: "weekly", kind: "weekly", usedPercent: 46, remainingPercent: 54,
+      windowDurationMins: 10080, resetsAt: null }]
+  } } as any;
+  const bridge = new CodexMicroRendererBridge(() => {}, {
+    refresh: async force => { forced = force; return snapshot; }, close() {}
+  });
+  (bridge as any).ensureConnected = async () => { throw new DebugBridgeUnavailableError("normal launch"); };
+  assert.equal(await bridge.requestUsageRefresh(), snapshot);
+  assert.equal(forced, true);
   bridge.close();
 });

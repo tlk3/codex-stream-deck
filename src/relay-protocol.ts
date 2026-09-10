@@ -390,7 +390,7 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   ])) return false;
   if (snapshot.transport !== undefined && snapshot.transport !== "desktop-ipc") return false;
   if (snapshot.transport === "desktop-ipc" && ["reasoningEffort", "activeModelId", "activeModelDisplayName",
-    "modelCatalog", "fastModeEnabled", "activeThreadKey", "activeThreadTitle", "usage"].some(key => snapshot[key] !== undefined)) return false;
+    "modelCatalog", "fastModeEnabled", "activeThreadKey", "activeThreadTitle"].some(key => snapshot[key] !== undefined)) return false;
   const slots = snapshotOwnDataArray(snapshot.slots, 6);
   if (!slots || slots.length !== 6 || !isLayout(snapshot.layout, snapshot.transport === "desktop-ipc")) return false;
   if (!slots.every((rawSlot, index) => {

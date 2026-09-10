@@ -10,6 +10,7 @@ import {
 import { CodexRelayClient, readRelayClientConfig } from "./codex-relay-client.js";
 import { CodexRelayServer, readRelayServerConfig } from "./codex-relay-server.js";
 import { CodexMicroRendererBridge } from "./codex-micro-renderer-bridge.js";
+import { DesktopUsageUnavailableError } from "./codex-desktop-ipc.js";
 import { getOrCreateHostIdentity } from "./host-identity.js";
 import { ADDITIONAL_KEYCAPS, type OfficialKeycapId } from "./keycaps.js";
 import {
@@ -1253,7 +1254,11 @@ export class DeckController {
       this.lastError = "";
     } catch (error) {
       if (generation !== this.localSnapshotGeneration) throw error;
-      this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
+      if (error instanceof DesktopUsageUnavailableError && this.localSnapshot?.snapshot.transport === "desktop-ipc") {
+        this.localSnapshot = { ...this.localSnapshot, snapshot: { ...this.localSnapshot.snapshot, usage: undefined } };
+      } else {
+        this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
+      }
       const message = String(error);
       if (message !== this.lastError) {
         this.lastError = message;

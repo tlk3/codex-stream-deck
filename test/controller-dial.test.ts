@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck";
 import { DeckController } from "../src/controller.js";
+import { DesktopUsageUnavailableError } from "../src/codex-desktop-ipc.js";
 import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
 import type {
   CodexDialSettings, DialRuntimeState, ModelPresetEntry, ModelPresetsDialSettings
@@ -55,6 +56,7 @@ type ControllerProbe = {
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
     refresh?(): Promise<MicroSnapshot>;
+    requestUsageRefresh?(): Promise<MicroSnapshot>;
     close?(): void;
   };
   keycapImages: Map<string, Promise<string | null>>;
@@ -2031,6 +2033,27 @@ test("agent feedback health follows the highlighted owner instead of the functio
   remoteTarget.registerDial(localAgent, expandDialPreset("agents"));
   await settle();
   assert.equal((localAgent.feedbackCalls.at(-1) as { value?: string }).value, "TASK LOCAL-OWNER");
+});
+
+test("IPC account failures clear usage without degrading connected task controls", async () => {
+  for (const accountOnly of [true, false]) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    state.localHost = HOST;
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.localSnapshot = { host: HOST, observedAt: 1_000,
+      snapshot: { ...SNAPSHOT, transport: "desktop-ipc" } };
+    state.microBridge = {
+      async sendAgent() {},
+      async requestUsageRefresh() {
+        if (accountOnly) throw new DesktopUsageUnavailableError("Usage unavailable");
+        throw new Error("IPC disconnected");
+      }
+    };
+    await assert.rejects(state.refreshLocalUsage());
+    assert.equal(state.localHealth.state, accountOnly ? "ready" : "degraded");
+    if (accountOnly) assert.equal(state.localSnapshot?.snapshot.usage, undefined);
+  }
 });
 
 test("local dial usage refresh requires ready health", async () => {

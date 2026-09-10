@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { CodexDesktopIpcBridge, encodeIpcFrame, IpcFrameReader } from "../src/codex-desktop-ipc.js";
 import { parseRelayServerMessage } from "../src/relay-protocol.js";
-import type { MicroSnapshot } from "../src/types.js";
+import type { MicroSnapshot, UsageSnapshot } from "../src/types.js";
 
 const id = "019fe6f4-531d-7542-b696-c95718d96a2d";
 function stream(change: unknown, version = 11) {
@@ -17,7 +17,8 @@ const initial = () => stream({ type: "snapshot", revision: 1, conversationState:
   title: "Current task", threadRuntimeStatus: { type: "active" }, requests: [], hasUnreadTurn: false
 } });
 
-async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: unknown) => void) => Promise<void>) {
+async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: unknown) => void) => Promise<void>,
+  readUsage: (force?: boolean) => Promise<UsageSnapshot | undefined> = async () => undefined) {
   const directory = await mkdtemp(join(tmpdir(), "deck-ipc-safety-"));
   const socketPath = join(directory, "ipc.sock");
   const peers = new Set<net.Socket>();
@@ -43,7 +44,7 @@ async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: 
   });
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
   const bridge = new CodexDesktopIpcBridge(() => {}, { socketPath, verifyApp: async () => {},
-    readThreads: async () => [{ id, title: "Stored task", activityAt: 100 }] });
+    readThreads: async () => [{ id, title: "Stored task", activityAt: 100 }] }, { read: readUsage, close() {} });
   try { await run(bridge, message => queued.push(message)); }
   finally {
     bridge.close();
@@ -73,6 +74,48 @@ test("IPC relay permits task-only snapshots and rejects invented composer/action
     analog.layout.analogStick.up = { type: "command", commandId: "toggleSidebar" };
     assert.equal(parseRelayServerMessage(relay(analog)), null);
   });
+});
+
+test("normal-launch usage is included and refreshable without inventing composer authority", async () => {
+  const calls: boolean[] = [];
+  const usage: UsageSnapshot = { observedAt: Date.now(), resetCreditsAvailable: 1, resetCreditsApplicable: null,
+    windows: [{ id: "weekly", kind: "weekly", usedPercent: 46, remainingPercent: 54,
+      windowDurationMins: 10080, resetsAt: 1789436723000 }] };
+  await withBridge(async bridge => {
+    await bridge.refresh();
+    const snapshot = await bridge.refresh();
+    assert.deepEqual(snapshot.usage, usage);
+    assert.equal(snapshot.activeModelId, undefined);
+    assert.ok(parseRelayServerMessage({ type: "snapshot", protocol: 1,
+      host: { hostId: "local", hostName: "Mac", platform: "darwin" }, observedAt: 100, snapshot }));
+    await bridge.refresh(true);
+    assert.deepEqual(calls, [false, false, true]);
+  }, async force => { calls.push(force === true); return usage; });
+});
+
+test("disconnect during forced usage remains a transport failure", async () => {
+  for (const failUsage of [true, false]) {
+    let disconnect = () => {};
+    await withBridge(async bridge => {
+      disconnect = () => bridge.close();
+      await assert.rejects(bridge.refresh(true), /Codex IPC disconnected/);
+    }, async () => {
+      disconnect();
+      if (failUsage) throw new Error("helper canceled");
+      return { observedAt: Date.now(), resetCreditsAvailable: null, resetCreditsApplicable: null,
+        windows: [{ id: "weekly", kind: "weekly", usedPercent: 10, remainingPercent: 90,
+          windowDurationMins: 10080, resetsAt: null }] };
+    });
+  }
+});
+
+test("automatic usage failure does not take live task status offline", async () => {
+  await withBridge(async bridge => {
+    const snapshot = await bridge.refresh();
+    assert.equal(snapshot.slots[0]?.status, "working");
+    assert.equal(snapshot.usage, undefined);
+    await assert.rejects(bridge.refresh(true), /usage read failed/);
+  }, async () => { throw new Error("usage read failed"); });
 });
 
 for (const [name, update] of [
