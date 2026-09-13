@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { MicroSnapshot, UsageSnapshot } from "./types.js";
 import { CodexAppServerUsageReader } from "./codex-app-server-usage.js";
+import { IpcStatusFrameReader } from "./codex-ipc-status-frame-reader.js";
 
 const exec = promisify(execFile);
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -105,6 +106,7 @@ export class CodexDesktopIpcBridge {
   private options: Options;
   private blockedUntil = 0;
   private usageSnapshot?: UsageSnapshot;
+  private statusReader?: IpcStatusFrameReader;
 
   constructor(private log: (message: string) => void, options: Partial<Options> = {},
     private readonly usageReader: Pick<CodexAppServerUsageReader, "read" | "close"> = new CodexAppServerUsageReader({ log })) {
@@ -172,6 +174,7 @@ export class CodexDesktopIpcBridge {
   }
 
   close(): void {
+    this.statusReader?.close(); this.statusReader = undefined;
     this.usageSnapshot = undefined;
     this.usageReader.close();
     const socket = this.socket; this.socket = undefined; this.clientId = undefined;
@@ -195,15 +198,28 @@ export class CodexDesktopIpcBridge {
       !entry.isSocket() || entry.uid !== uid) throw new Error("Unsafe Codex IPC socket ownership");
     const socket = net.createConnection(this.options.socketPath);
     this.socket = socket;
-    const reader = new IpcFrameReader();
+    const reader = new IpcStatusFrameReader(() => {
+      if (this.socket !== socket) return;
+      this.log("Codex IPC frame processing timed out.");
+      this.blockedUntil = Date.now() + 30000; this.close();
+    });
+    this.statusReader = reader;
     socket.on("data", chunk => {
       if (this.socket !== socket) return;
-      try { for (const message of reader.push(chunk)) this.onMessage(message); }
-      catch (error) {
-        // Never include JSON parser errors, which may quote private task content.
-        this.log(error instanceof IpcFrameSizeError ? error.message : "Codex IPC input is malformed.");
+      // Apply backpressure while parsing; never queue a task-sized buffer of chunks.
+      socket.pause();
+      void reader.push(chunk).then(messages => {
+        if (this.socket !== socket) return;
+        for (const message of messages) {
+          if (this.socket !== socket) break;
+          this.onMessage(message);
+        }
+      }).catch(() => {
+        if (this.socket !== socket) return;
+        // Tokenizer errors may quote private content. Log only a fixed message.
+        this.log("Codex IPC status projection failed (invalid JSON or metadata limits).");
         this.blockedUntil = Date.now() + 30000; this.close();
-      }
+      }).finally(() => { if (this.socket === socket && !socket.destroyed) socket.resume(); });
     });
     socket.on("error", () => { if (this.socket === socket) this.close(); });
     socket.on("close", () => { if (this.socket === socket) this.close(); });
@@ -219,7 +235,7 @@ export class CodexDesktopIpcBridge {
   private initialize(): Promise<void> {
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error("Codex IPC did not respond")); this.close(); }, 2000);
+      const timer = setTimeout(() => { this.pending.delete(requestId); reject(new Error("Codex IPC did not respond")); this.close(); }, 10000);
       this.pending.set(requestId, { resolve, reject, timer });
       try { this.send({ type: "request", requestId, method: "initialize", version: 0, params: { clientType: "codex-deck" } }); }
       catch (error) { clearTimeout(timer); this.pending.delete(requestId); reject(error); }
@@ -281,6 +297,7 @@ export class CodexDesktopIpcBridge {
       if (!Array.isArray(patch.path) || patch.path.length === 0) { this.live.delete(id); return; }
       const field = patch.path[0];
       if (!["threadRuntimeStatus", "requests", "hasUnreadTurn", "title"].includes(field)) continue;
+      if (patch.__codexStatusValueOmitted === true) { this.live.delete(id); return; }
       // Nested mutations need a fresh snapshot; do not reconstruct or retain message/request payloads.
       if (patch.path.length !== 1 || !["add", "replace"].includes(patch.op)) { this.live.delete(id); return; }
       if (field === "title") live.title = typeof patch.value === "string" ? patch.value.slice(0, 240) : "";

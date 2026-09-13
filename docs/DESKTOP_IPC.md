@@ -39,12 +39,26 @@ versions, missed revisions and nested status changes require a fresh snapshot.
 The fallback reads recent ordering rather than pinned/custom Micro assignments.
 
 This uses Codex's internal IPC stream version 11 and following version 1, not a
-stable public API. Incoming frames are bounded to 64 MiB (Codex 26.908 can send
-full task snapshots above 32 MiB); outgoing frames remain bounded to 32 MiB.
-Oversized/malformed input closes
-the connection with a 30-second retry cooldown. A future protocol change can
+stable public API. Incoming frames are parsed incrementally with socket
+backpressure: complete task history is never buffered or assembled into objects.
+Only bounded status metadata is retained, including when a snapshot is larger
+than the previous 32/64 MiB limits. The wire protocol's 32-bit frame length does
+not determine an allocation. Each frame has a 30-second processing deadline;
+router responses allow ten seconds for large snapshots ahead of them. Outgoing
+frames remain bounded to 32 MiB. Invalid JSON, metadata-limit violations, or frame
+timeouts close the connection with a 30-second retry cooldown. A future protocol change can
 require another compatibility update. Complete normal-launch parity for composer
 and action controls still requires an additional supported desktop interface.
+
+The tokenizer is pinned to `stream-json` 1.9.1 for the plugin's Node 20 runtime;
+the current 3.x dependency chain requires Node 22. Only `Parser.js` and its UTF-8
+decoder are bundled. The npm advisory about quadratic-depth processing in the
+package's filters applies to modules this integration does not import or ship;
+no filters or assemblers are used. Projection also caps nesting at 128 levels,
+recognized keys at 128 characters, retained scalars at 4,096 characters, and
+cumulative retained metadata at 256 KiB. Oversized unknown keys and task history
+are discarded incrementally. Unsupported patch values invalidate the affected
+task status and request a fresh snapshot.
 
 On Codex 26.903.61454, the inspected IPC routes expose task owner/follower updates,
 not a general desktop command registry/dispatcher or the focused composer's
