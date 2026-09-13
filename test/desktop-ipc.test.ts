@@ -16,8 +16,24 @@ test("IPC frames survive fragmented and coalesced socket reads, reject oversized
   assert.deepEqual(reader.push(Buffer.concat([frame.subarray(2), frame])), [
     { type: "response", requestId: "1" }, { type: "response", requestId: "1" }
   ]);
-  const oversized = Buffer.alloc(4); oversized.writeUInt32LE(64 * 1024 * 1024);
+  const oversized = Buffer.alloc(4); oversized.writeUInt32LE(64 * 1024 * 1024 + 1);
   assert.throws(() => reader.push(oversized), /large/);
+});
+
+test("large task snapshots above 32 MiB do not disconnect subsequent IPC messages", () => {
+  // Codex 26.908 sends complete long-task snapshots exceeding the old limit.
+  const body = Buffer.from(JSON.stringify({ type: "broadcast", payload: "x".repeat(36 * 1024 * 1024) }));
+  const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
+  const reader = new IpcFrameReader();
+  assert.deepEqual(reader.push(header.subarray(0, 2)), []);
+  assert.deepEqual(reader.push(header.subarray(2)), []);
+  let decoded: unknown[] = [];
+  for (let offset = 0; offset < body.length; offset += 8192) {
+    decoded = reader.push(body.subarray(offset, offset + 8192));
+  }
+  assert.equal((decoded[0] as { payload: string }).payload.length, 36 * 1024 * 1024);
+  assert.deepEqual(reader.push(encodeIpcFrame({ type: "response", requestId: "after-large" })),
+    [{ type: "response", requestId: "after-large" }]);
 });
 
 test("IPC status projection keeps activity and pending input, never retains task content or claims composer authority", () => {

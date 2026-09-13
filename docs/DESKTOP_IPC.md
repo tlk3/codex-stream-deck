@@ -39,7 +39,9 @@ versions, missed revisions and nested status changes require a fresh snapshot.
 The fallback reads recent ordering rather than pinned/custom Micro assignments.
 
 This uses Codex's internal IPC stream version 11 and following version 1, not a
-stable public API. Frames are bounded to 32 MiB; oversized/malformed input closes
+stable public API. Incoming frames are bounded to 64 MiB (Codex 26.908 can send
+full task snapshots above 32 MiB); outgoing frames remain bounded to 32 MiB.
+Oversized/malformed input closes
 the connection with a 30-second retry cooldown. A future protocol change can
 require another compatibility update. Complete normal-launch parity for composer
 and action controls still requires an additional supported desktop interface.

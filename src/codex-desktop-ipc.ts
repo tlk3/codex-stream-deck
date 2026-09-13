@@ -11,11 +11,19 @@ import { CodexAppServerUsageReader } from "./codex-app-server-usage.js";
 const exec = promisify(execFile);
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_FRAME = 32 * 1024 * 1024;
+// Codex 26.908 can send full task snapshots above 32 MiB. Keep the
+// inbound allocation bounded independently of our small outbound messages.
+const MAX_RECEIVE_FRAME = 64 * 1024 * 1024;
 const ROOT = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 type Thread = { id: string; title: string; activityAt: number };
 type Live = { title: string; status: string; revision: number; owner: string; state: Record<string, any> };
 type Options = { socketPath: string; readThreads: () => Promise<Thread[]>; verifyApp: () => Promise<void> };
 export class DesktopUsageUnavailableError extends Error {}
+class IpcFrameSizeError extends Error {
+  constructor(readonly bytes: number) {
+    super(`Codex IPC frame too large or empty (${bytes} bytes; receive limit ${MAX_RECEIVE_FRAME})`);
+  }
+}
 
 export function encodeIpcFrame(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message));
@@ -40,7 +48,7 @@ export class IpcFrameReader {
         this.headerBytes += count; offset += count;
         if (this.headerBytes < 4) break;
         const size = this.header.readUInt32LE(0);
-        if (size === 0 || size > MAX_FRAME) throw new Error("Codex IPC frame too large or empty");
+        if (size === 0 || size > MAX_RECEIVE_FRAME) throw new IpcFrameSizeError(size);
         this.body = Buffer.allocUnsafe(size); this.bodyBytes = 0; this.headerBytes = 0;
       }
       const count = Math.min(this.body.length - this.bodyBytes, chunk.length - offset);
@@ -191,7 +199,11 @@ export class CodexDesktopIpcBridge {
     socket.on("data", chunk => {
       if (this.socket !== socket) return;
       try { for (const message of reader.push(chunk)) this.onMessage(message); }
-      catch { this.log("Codex IPC input is malformed or exceeds the supported frame limit."); this.blockedUntil = Date.now() + 30000; this.close(); }
+      catch (error) {
+        // Never include JSON parser errors, which may quote private task content.
+        this.log(error instanceof IpcFrameSizeError ? error.message : "Codex IPC input is malformed.");
+        this.blockedUntil = Date.now() + 30000; this.close();
+      }
     });
     socket.on("error", () => { if (this.socket === socket) this.close(); });
     socket.on("close", () => { if (this.socket === socket) this.close(); });
