@@ -20,6 +20,19 @@ type Thread = { id: string; title: string; activityAt: number };
 type Live = { title: string; status: string; revision: number; owner: string; state: Record<string, any> };
 type Options = { socketPath: string; readThreads: () => Promise<Thread[]>; verifyApp: () => Promise<void> };
 export class DesktopUsageUnavailableError extends Error {}
+export class TransientTaskCatalogUnavailableError extends Error {
+  constructor() {
+    super("Codex task catalog temporarily unavailable");
+    this.name = "TransientTaskCatalogUnavailableError";
+  }
+}
+
+export function isTransientTaskCatalogOpenFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const stderr = (error as { stderr?: unknown }).stderr;
+  return typeof stderr === "string" && stderr.includes("unable to open database file (14)");
+}
+
 class IpcFrameSizeError extends Error {
   constructor(readonly bytes: number) {
     super(`Codex IPC frame too large or empty (${bytes} bytes; receive limit ${MAX_RECEIVE_FRAME})`);
@@ -78,9 +91,15 @@ export function projectIpcStatus(state: Record<string, any>): string {
 
 async function readRecentThreads(): Promise<Thread[]> {
   // Read only the indexed catalog, never task messages, credentials, or database writes.
-  const { stdout } = await exec("/usr/bin/sqlite3", ["-readonly", "-json", join(ROOT, "state_5.sqlite"),
-    "SELECT id, substr(COALESCE(name,title),1,240) AS title, recency_at_ms AS activityAt FROM threads WHERE archived=0 AND preview<>'' AND agent_path IS NULL ORDER BY recency_at_ms DESC,id DESC LIMIT 6;"
-  ], { timeout: 2000, maxBuffer: 32768 });
+  let stdout: string;
+  try {
+    ({ stdout } = await exec("/usr/bin/sqlite3", ["-readonly", "-json", join(ROOT, "state_5.sqlite"),
+      "SELECT id, substr(COALESCE(name,title),1,240) AS title, recency_at_ms AS activityAt FROM threads WHERE archived=0 AND preview<>'' AND agent_path IS NULL ORDER BY recency_at_ms DESC,id DESC LIMIT 6;"
+    ], { timeout: 2000, maxBuffer: 32768 }));
+  } catch (error) {
+    if (isTransientTaskCatalogOpenFailure(error)) throw new TransientTaskCatalogUnavailableError();
+    throw error;
+  }
   const rows: unknown = JSON.parse(stdout || "[]");
   if (!Array.isArray(rows) || rows.length > 6 || rows.some(row => !row || !UUID.test(row.id) ||
     typeof row.title !== "string" || !Number.isFinite(row.activityAt))) throw new Error("Unsupported Codex task catalog");
@@ -124,7 +143,7 @@ export class CodexDesktopIpcBridge {
       threads = await this.options.readThreads();
       catalogReadSucceeded = true;
     } catch (error) {
-      if (!this.threadCatalog) throw error;
+      if (!(error instanceof TransientTaskCatalogUnavailableError) || !this.threadCatalog) throw error;
       threads = this.threadCatalog;
       if (!this.threadCatalogFallbackActive) {
         this.log("Codex task catalog temporarily unavailable; retaining the last validated catalog.");

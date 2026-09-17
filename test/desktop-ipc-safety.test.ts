@@ -4,7 +4,8 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CodexDesktopIpcBridge, encodeIpcFrame, IpcFrameReader } from "../src/codex-desktop-ipc.js";
+import { CodexDesktopIpcBridge, encodeIpcFrame, IpcFrameReader, isTransientTaskCatalogOpenFailure,
+  TransientTaskCatalogUnavailableError } from "../src/codex-desktop-ipc.js";
 import { parseRelayServerMessage } from "../src/relay-protocol.js";
 import type { MicroSnapshot, UsageSnapshot } from "../src/types.js";
 
@@ -69,20 +70,27 @@ test("transient task-catalog failures retain live IPC status from the last valid
     assert.equal(recovered.slots[0]?.status, "off");
   }, async () => undefined, async () => {
     reads += 1;
-    if (reads === 2) throw new Error("sqlite temporarily unavailable");
+    if (reads === 2) throw new TransientTaskCatalogUnavailableError();
     return reads === 1 ? [{ id, title: "Stored task", activityAt: 100 }] : [];
   });
+});
+
+test("only SQLite open error 14 is classified as a transient task-catalog outage", () => {
+  assert.equal(isTransientTaskCatalogOpenFailure({ stderr: "Error: unable to open database file (14)" }), true);
+  assert.equal(isTransientTaskCatalogOpenFailure({ stderr: "Error: database is locked (5)" }), false);
+  assert.equal(isTransientTaskCatalogOpenFailure(new Error("unable to open database file (14)")), false);
+  assert.equal(isTransientTaskCatalogOpenFailure(null), false);
 });
 
 test("invalid task-catalog data is not hidden by the last validated catalog", async () => {
   let reads = 0;
   await withBridge(async bridge => {
     await bridge.refresh();
-    await assert.rejects(bridge.refresh(), /Invalid Codex IPC task list/);
+    await assert.rejects(bridge.refresh(), /Unsupported Codex task catalog/);
   }, async () => undefined, async () => {
     reads += 1;
     if (reads === 1) return [{ id, title: "Stored task", activityAt: 100 }];
-    return Array.from({ length: 7 }, (_, index) => ({ id, title: `Task ${index}`, activityAt: index }));
+    throw new Error("Unsupported Codex task catalog");
   });
 });
 
