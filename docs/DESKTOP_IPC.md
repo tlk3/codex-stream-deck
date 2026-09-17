@@ -8,6 +8,9 @@ This connection supports the six most recent local tasks and their live activity
 pending-input and unread status. Task buttons open the exact task through Codex's
 `codex://threads/<UUID>` URL handler. Task catalog reads use macOS's bundled
 SQLite executable in read-only mode and exclude archived tasks and subagents.
+After one validated read, a temporary SQLite-open failure retains that in-memory
+catalog while live IPC status continues; the next valid read replaces it. Invalid
+catalog data still fails closed instead of being hidden by the cache.
 
 Account usage is read separately through the bundled Codex CLI's short-lived
 `app-server --stdio` helper. It sends only initialization and

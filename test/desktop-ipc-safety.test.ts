@@ -18,7 +18,9 @@ const initial = () => stream({ type: "snapshot", revision: 1, conversationState:
 } });
 
 async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: unknown) => void) => Promise<void>,
-  readUsage: (force?: boolean) => Promise<UsageSnapshot | undefined> = async () => undefined) {
+  readUsage: (force?: boolean) => Promise<UsageSnapshot | undefined> = async () => undefined,
+  readThreads: () => Promise<Array<{ id: string; title: string; activityAt: number }>> =
+    async () => [{ id, title: "Stored task", activityAt: 100 }]) {
   const directory = await mkdtemp(join(tmpdir(), "deck-ipc-safety-"));
   const socketPath = join(directory, "ipc.sock");
   const peers = new Set<net.Socket>();
@@ -44,7 +46,7 @@ async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: 
   });
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
   const bridge = new CodexDesktopIpcBridge(() => {}, { socketPath, verifyApp: async () => {},
-    readThreads: async () => [{ id, title: "Stored task", activityAt: 100 }] }, { read: readUsage, close() {} });
+    readThreads }, { read: readUsage, close() {} });
   try { await run(bridge, message => queued.push(message)); }
   finally {
     bridge.close();
@@ -53,6 +55,36 @@ async function withBridge(run: (bridge: CodexDesktopIpcBridge, queue: (message: 
     await rm(directory, { recursive: true });
   }
 }
+
+test("transient task-catalog failures retain live IPC status from the last validated catalog", async () => {
+  let reads = 0;
+  await withBridge(async bridge => {
+    assert.equal((await bridge.refresh()).slots[0]?.status, "working");
+    const retained = await bridge.refresh();
+    assert.equal(retained.slots[0]?.threadKey, id);
+    assert.equal(retained.slots[0]?.title, "Current task");
+    assert.equal(retained.slots[0]?.status, "working");
+    const recovered = await bridge.refresh();
+    assert.equal(recovered.slots[0]?.threadKey, null);
+    assert.equal(recovered.slots[0]?.status, "off");
+  }, async () => undefined, async () => {
+    reads += 1;
+    if (reads === 2) throw new Error("sqlite temporarily unavailable");
+    return reads === 1 ? [{ id, title: "Stored task", activityAt: 100 }] : [];
+  });
+});
+
+test("invalid task-catalog data is not hidden by the last validated catalog", async () => {
+  let reads = 0;
+  await withBridge(async bridge => {
+    await bridge.refresh();
+    await assert.rejects(bridge.refresh(), /Invalid Codex IPC task list/);
+  }, async () => undefined, async () => {
+    reads += 1;
+    if (reads === 1) return [{ id, title: "Stored task", activityAt: 100 }];
+    return Array.from({ length: 7 }, (_, index) => ({ id, title: `Task ${index}`, activityAt: index }));
+  });
+});
 
 test("IPC relay permits task-only snapshots and rejects invented composer/action authority", async () => {
   await withBridge(async bridge => {

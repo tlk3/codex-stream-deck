@@ -107,6 +107,8 @@ export class CodexDesktopIpcBridge {
   private blockedUntil = 0;
   private usageSnapshot?: UsageSnapshot;
   private statusReader?: IpcStatusFrameReader;
+  private threadCatalog?: Thread[];
+  private threadCatalogFallbackActive = false;
 
   constructor(private log: (message: string) => void, options: Partial<Options> = {},
     private readonly usageReader: Pick<CodexAppServerUsageReader, "read" | "close"> = new CodexAppServerUsageReader({ log })) {
@@ -116,8 +118,26 @@ export class CodexDesktopIpcBridge {
 
   async refresh(forceUsageRefresh = false): Promise<MicroSnapshot> {
     await this.options.verifyApp();
-    const threads = await this.options.readThreads();
+    let threads: Thread[];
+    let catalogReadSucceeded = false;
+    try {
+      threads = await this.options.readThreads();
+      catalogReadSucceeded = true;
+    } catch (error) {
+      if (!this.threadCatalog) throw error;
+      threads = this.threadCatalog;
+      if (!this.threadCatalogFallbackActive) {
+        this.log("Codex task catalog temporarily unavailable; retaining the last validated catalog.");
+      }
+      this.threadCatalogFallbackActive = true;
+    }
     if (threads.length > 6 || threads.some(t => !UUID.test(t.id))) throw new Error("Invalid Codex IPC task list");
+    if (catalogReadSucceeded) {
+      threads = [...threads];
+      this.threadCatalog = threads;
+      if (this.threadCatalogFallbackActive) this.log("Codex task catalog available again.");
+      this.threadCatalogFallbackActive = false;
+    }
     await this.connect();
     // Round-trip to the existing router: an open but wedged socket is not healthy.
     await this.initialize();
