@@ -30,6 +30,8 @@ const WATCHER_STATE_PATH = join(STATE_ROOT, "watcher-state.json");
 const WATCHER_LOG_PATH = join(STATE_ROOT, "watcher.log");
 const WATCHER_STDERR_PATH = join(STATE_ROOT, "watcher.stderr.log");
 const WATCHER_LOCK_PATH = join(STATE_ROOT, "watcher.lock");
+const RESTART_HANDOFF_ROOT = join(STATE_ROOT, "restart-handoffs");
+const RESTART_HANDOFF_LOCK_PATH = join(RESTART_HANDOFF_ROOT, "active.lock");
 const RELAY_SERVER_CONFIG_PATH = join(STATE_ROOT, "relay-server.json");
 const MOBILE_LOCAL_CONFIG_PATH = join(STATE_ROOT, LOCAL_MOBILE_CONFIG);
 const INSTALLED_RUNTIME_PATH = join(STATE_ROOT, "codex-deck-macos.mjs");
@@ -62,6 +64,26 @@ type BridgeState = HostState & {
   updatedAt: string;
   platform: "darwin";
   codexVersion: string;
+};
+
+export type RestartHandoffRequest = {
+  operationId: string;
+  expectedPid: number;
+  expectedGeneration: string;
+  expectedAppPath: string;
+  expectedExecutablePath: string;
+  requestedAt: string;
+};
+
+type RestartAuthorization = Pick<
+  RestartHandoffRequest,
+  "expectedGeneration" | "expectedAppPath" | "expectedExecutablePath"
+>;
+
+type RestartHandoffStatus = RestartHandoffRequest & {
+  status: "accepted" | "running" | "completed" | "rejected" | "failed";
+  updatedAt: string;
+  detail?: string;
 };
 
 function run(command: string, args: string[], options: { allowFailure?: boolean } = {}): string {
@@ -168,8 +190,8 @@ export async function discoverCodexInstallation(): Promise<CodexInstallation> {
   return installations[0]!;
 }
 
-function findMainProcess(installation: CodexInstallation): MainProcess | null {
-  const row = processRows().find((candidate) =>
+function findMainProcessInRows(installation: CodexInstallation, rows: ReturnType<typeof processRows>): MainProcess | null {
+  const row = rows.find((candidate) =>
     candidate.ppid === 1 &&
     (candidate.command === installation.executablePath || candidate.command.startsWith(`${installation.executablePath} `))
   );
@@ -179,6 +201,25 @@ function findMainProcess(installation: CodexInstallation): MainProcess | null {
     generation: `${row.pid}:${row.startedAt}:${installation.executablePath}`,
     installation
   };
+}
+
+function findMainProcess(installation: CodexInstallation): MainProcess | null {
+  return findMainProcessInRows(installation, processRows());
+}
+
+async function runningCodexMains(): Promise<MainProcess[]> {
+  const rows = processRows();
+  const mains: MainProcess[] = [];
+  for (const row of rows) {
+    if (row.ppid !== 1) continue;
+    const appPath = appPathFromExecutable(row.command);
+    if (!appPath) continue;
+    const installation = await installationFromApp(appPath);
+    if (!installation) continue;
+    const main = findMainProcessInRows(installation, [row]);
+    if (main) mains.push(main);
+  }
+  return mains;
 }
 
 export function parseDebugPort(command: string): number | null {
@@ -298,6 +339,31 @@ export function buildCodexLaunchSpec(installation: Pick<CodexInstallation, "appP
   };
 }
 
+export function buildCodexRestartHandoffSpec(
+  runtimePath: string,
+  expectedPid: number,
+  executable = process.execPath,
+  operationId?: string
+): { command: string; args: string[]; options: { detached: true; stdio: "ignore" } } {
+  if (!Number.isSafeInteger(expectedPid) || expectedPid < 1) throw new Error(`Invalid Codex process ID: ${expectedPid}`);
+  return {
+    command: executable,
+    args: [runtimePath, "restart-handoff", String(expectedPid), ...(operationId ? [operationId] : [])],
+    options: { detached: true, stdio: "ignore" }
+  };
+}
+
+export async function spawnDetachedRestartHandoff(
+  spec: ReturnType<typeof buildCodexRestartHandoffSpec>
+): Promise<void> {
+  const child = spawn(spec.command, spec.args, spec.options);
+  await new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("spawn", resolveSpawn);
+    child.once("error", rejectSpawn);
+  });
+  child.unref();
+}
+
 async function launchCodex(installation: CodexInstallation, port: number): Promise<void> {
   // Launch through LaunchServices so macOS associates TCC/Input Monitoring
   // state with the signed app bundle, while still passing Electron's CDP flags.
@@ -315,6 +381,113 @@ async function terminateCodex(main: MainProcess): Promise<void> {
     await delay(250);
   }
   throw new Error(`Codex main process ${main.pid} did not exit after SIGTERM; it was not force-killed.`);
+}
+
+function restartHandoffStatusPath(operationId: string): string {
+  if (!/^[0-9a-f-]{36}$/i.test(operationId)) throw new Error("Invalid restart handoff operation ID.");
+  return join(RESTART_HANDOFF_ROOT, `${operationId}.json`);
+}
+
+async function writeRestartHandoffStatus(
+  statusPath: string,
+  request: RestartHandoffRequest,
+  status: RestartHandoffStatus["status"],
+  detail?: string
+): Promise<void> {
+  await atomicWriteJson(statusPath, {
+    ...request,
+    status,
+    updatedAt: new Date().toISOString(),
+    ...(detail ? { detail } : {})
+  } satisfies RestartHandoffStatus);
+}
+
+export async function runExclusiveRestartHandoff(
+  request: RestartHandoffRequest,
+  paths: { lockPath: string; statusPath: string },
+  execute: () => Promise<void>
+): Promise<number> {
+  const release = await acquirePidLock(paths.lockPath);
+  if (!release) {
+    await writeRestartHandoffStatus(paths.statusPath, request, "rejected", "Another explicit Codex restart is already running.");
+    return 3;
+  }
+  try {
+    await writeRestartHandoffStatus(paths.statusPath, request, "running");
+    await execute();
+    await writeRestartHandoffStatus(paths.statusPath, request, "completed");
+    return 0;
+  } catch (error) {
+    await writeRestartHandoffStatus(paths.statusPath, request, "failed", String(error));
+    throw error;
+  } finally {
+    await release();
+  }
+}
+
+export function assertAuthorizedRestartGeneration(
+  main: Pick<MainProcess, "generation"> | null,
+  expectedGeneration: string
+): void {
+  if (main && main.generation !== expectedGeneration) {
+    throw new Error("Codex changed before the explicit restart; the stale restart handoff was cancelled.");
+  }
+}
+
+export function assertAuthorizedRestartInstallation(
+  installation: Pick<CodexInstallation, "appPath" | "executablePath">,
+  authorization: Pick<RestartAuthorization, "expectedAppPath" | "expectedExecutablePath">
+): void {
+  if (
+    installation.appPath !== authorization.expectedAppPath ||
+    installation.executablePath !== authorization.expectedExecutablePath
+  ) {
+    throw new Error("The Codex installation changed before the explicit restart; the stale restart handoff was cancelled.");
+  }
+}
+
+async function authorizedRestartInstallation(authorization: RestartAuthorization): Promise<CodexInstallation> {
+  const installation = await installationFromApp(authorization.expectedAppPath);
+  if (!installation) throw new Error("The authorized Codex installation is no longer available.");
+  assertAuthorizedRestartInstallation(installation, authorization);
+  return installation;
+}
+
+async function liveAuthorizedRestartMain(
+  authorization: RestartAuthorization
+): Promise<{ installation: CodexInstallation; main: MainProcess | null }> {
+  const observedMains = await runningCodexMains();
+  if (observedMains.length > 1) {
+    throw new Error("Multiple Codex processes appeared before the explicit restart; the handoff was cancelled.");
+  }
+  const observedMain = observedMains[0];
+  if (observedMain) {
+    assertAuthorizedRestartInstallation(observedMain.installation, authorization);
+    assertAuthorizedRestartGeneration(observedMain, authorization.expectedGeneration);
+    return { installation: observedMain.installation, main: observedMain };
+  }
+  return { installation: await authorizedRestartInstallation(authorization), main: null };
+}
+
+async function handoffCodexRestart(main: MainProcess): Promise<{ operationId: string; statusPath: string }> {
+  const request: RestartHandoffRequest = {
+    operationId: randomUUID(),
+    expectedPid: main.pid,
+    expectedGeneration: main.generation,
+    expectedAppPath: main.installation.appPath,
+    expectedExecutablePath: main.installation.executablePath,
+    requestedAt: new Date().toISOString()
+  };
+  const statusPath = restartHandoffStatusPath(request.operationId);
+  await writeRestartHandoffStatus(statusPath, request, "accepted");
+  const spec = buildCodexRestartHandoffSpec(builtRuntimeSource(), main.pid, process.execPath, request.operationId);
+  try {
+    await spawnDetachedRestartHandoff(spec);
+  } catch (error) {
+    await writeRestartHandoffStatus(statusPath, request, "failed", `Restart helper did not start: ${String(error)}`);
+    throw error;
+  }
+  return { operationId: request.operationId, statusPath };
 }
 
 const delay = (milliseconds: number) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -641,6 +814,7 @@ async function uninstallLaunchAgent(): Promise<void> {
     await rm(path, { force: true });
   }
   await rm(WATCHER_LOCK_PATH, { recursive: true, force: true });
+  await rm(RESTART_HANDOFF_ROOT, { recursive: true, force: true });
   console.log("Codex Deck LaunchAgent and Nearby credentials removed. host.json and the icons directory were preserved.");
 }
 
@@ -701,27 +875,80 @@ async function disableMobileLocal(): Promise<void> {
   console.log("Nearby iPhone node disabled. The watcher will stop advertising it without restarting Codex.");
 }
 
-async function startOnce(allowRestart: boolean): Promise<number> {
-  let installation = await discoverCodexInstallation();
+async function startOnce(allowRestart: boolean, authorization?: RestartAuthorization): Promise<number> {
+  let installation = authorization
+    ? await authorizedRestartInstallation(authorization)
+    : await discoverCodexInstallation();
   const main = findMainProcess(installation);
+  if (authorization) assertAuthorizedRestartGeneration(main, authorization.expectedGeneration);
   let port = await healthyDebugPort(main);
   if (main && !port && !allowRestart) {
     console.error("Codex is already running without a reusable loopback bridge.");
     console.error("A restart requires explicit permission. Re-run with --restart only after saving unsent composer text.");
     return 2;
   }
+  if (main && !port && allowRestart && !authorization) {
+    const handoff = await handoffCodexRestart(main);
+    console.log(`Codex Deck restart accepted as ${handoff.operationId}; completion will be recorded in ${handoff.statusPath}.`);
+    return 0;
+  }
   if (main && !port) {
-    await terminateCodex(main);
-    installation = await discoverCodexInstallation();
+    const live = authorization
+      ? await liveAuthorizedRestartMain(authorization)
+      : { installation, main };
+    const immediateMain = authorization ? findMainProcess(live.installation) : live.main;
+    if (authorization) assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+    if (immediateMain) await terminateCodex(immediateMain);
+    installation = authorization
+      ? await authorizedRestartInstallation(authorization)
+      : await discoverCodexInstallation();
   }
   if (!port) {
     port = await chooseLoopbackPort();
+    if (authorization) {
+      installation = await authorizedRestartInstallation(authorization);
+      const live = await liveAuthorizedRestartMain(authorization);
+      if (live.main) throw new Error("The authorized Codex process is still running; a duplicate launch was cancelled.");
+      const immediateMain = findMainProcess(installation);
+      assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+      if (immediateMain) throw new Error("The authorized Codex process reappeared; a duplicate launch was cancelled.");
+    }
     await launchCodex(installation, port);
   }
   const result = await enableBridge(installation, port);
   console.log(`Codex Deck ready on 127.0.0.1:${port}.`);
   console.log(JSON.stringify(result, null, 2));
   return 0;
+}
+
+async function resumeRestartHandoff(expectedPidValue: string | undefined, operationIdValue: string | undefined): Promise<number> {
+  const expectedPid = Number(expectedPidValue);
+  if (!Number.isSafeInteger(expectedPid) || expectedPid < 1) throw new Error(`Invalid Codex process ID: ${expectedPidValue ?? "missing"}`);
+  const operationId = operationIdValue ?? "";
+  const statusPath = restartHandoffStatusPath(operationId);
+  const request = await readJson<RestartHandoffRequest>(statusPath);
+  if (
+    !request || request.operationId !== operationId || request.expectedPid !== expectedPid ||
+    typeof request.expectedGeneration !== "string" || request.expectedGeneration.length === 0 ||
+    typeof request.expectedAppPath !== "string" || request.expectedAppPath.length === 0 ||
+    typeof request.expectedExecutablePath !== "string" || request.expectedExecutablePath.length === 0 ||
+    typeof request.requestedAt !== "string" || request.requestedAt.length === 0
+  ) {
+    throw new Error("Restart handoff request is missing or invalid.");
+  }
+  await log(`Explicit restart handoff ${operationId} accepted for Codex process ${expectedPid}.`);
+  try {
+    const code = await runExclusiveRestartHandoff(
+      request,
+      { lockPath: RESTART_HANDOFF_LOCK_PATH, statusPath },
+      async () => { await startOnce(true, request); }
+    );
+    await log(`Explicit restart handoff ${operationId} finished with exit code ${code}.`);
+    return code;
+  } catch (error) {
+    await log(`Explicit restart handoff ${operationId} failed: ${String(error)}`);
+    throw error;
+  }
 }
 
 async function selfTest(): Promise<void> {
@@ -800,6 +1027,7 @@ async function main(): Promise<number> {
   }
   if (command === "mobile-local-disable") { await disableMobileLocal(); return 0; }
   if (command === "watch") return await runWatcher();
+  if (command === "restart-handoff") return await resumeRestartHandoff(process.argv[3], process.argv[4]);
   if (command === "start") return await startOnce(process.argv.includes("--restart"));
   if (command === "--restart") return await startOnce(true);
   throw new Error("Usage: start-codex-deck.sh [start [--restart]|dry-run|self-test|install|uninstall|watch|relay-config <127.0.0.1-or-tailscale-ip> [port]|relay-disable|mobile-local-config [port] [--rotate]|mobile-local-disable|print-launch-agent]");

@@ -2,10 +2,20 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { buildCodexLaunchSpec, buildLaunchAgentPlist, buildWatcherLaunchScript, parseDebugPort } from "../launcher/macos/codex-deck-macos.js";
+import {
+  assertAuthorizedRestartGeneration,
+  assertAuthorizedRestartInstallation,
+  buildCodexLaunchSpec,
+  buildCodexRestartHandoffSpec,
+  buildLaunchAgentPlist,
+  buildWatcherLaunchScript,
+  parseDebugPort,
+  runExclusiveRestartHandoff,
+  spawnDetachedRestartHandoff
+} from "../launcher/macos/codex-deck-macos.js";
 import { codexDeckStateRoot } from "../src/codex-deck-paths.js";
 
 const execFile = promisify(execFileCallback);
@@ -29,6 +39,93 @@ test("macOS launcher validates ports and parses both supported flag forms", () =
   assert.equal(parseDebugPort("Codex --remote-debugging-port=43123"), 43123);
   assert.equal(parseDebugPort("Codex --remote-debugging-port 43124"), 43124);
   assert.equal(parseDebugPort("Codex --remote-debugging-port=70000"), null);
+});
+
+test("macOS restart handoff survives the Codex terminal that requested it", () => {
+  const spec = buildCodexRestartHandoffSpec("/tmp/codex-deck-macos.mjs", 43123, "/tmp/node");
+  assert.equal(spec.command, "/tmp/node");
+  assert.deepEqual(spec.args, ["/tmp/codex-deck-macos.mjs", "restart-handoff", "43123"]);
+  assert.deepEqual(spec.options, { detached: true, stdio: "ignore" });
+});
+
+test("detached restart helper outlives its calling terminal process", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-handoff-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = join(root, "helper-finished");
+  const helper = join(root, "helper.mjs");
+  const parent = join(root, "parent.mts");
+  await writeFile(helper, `import { writeFile } from "node:fs/promises";
+setTimeout(() => void writeFile(${JSON.stringify(marker)}, "finished\\n"), 150);
+`);
+  await writeFile(parent, `import { buildCodexRestartHandoffSpec, spawnDetachedRestartHandoff } from ${JSON.stringify(resolve("launcher/macos/codex-deck-macos.ts"))};
+async function main() {
+  const spec = buildCodexRestartHandoffSpec(${JSON.stringify(helper)}, 43123, process.execPath);
+  await spawnDetachedRestartHandoff(spec);
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });
+`);
+
+  await execFile(process.execPath, ["--import", "tsx", parent]);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await access(marker).then(() => true).catch(() => false)) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  assert.equal(await readFile(marker, "utf8"), "finished\n");
+});
+
+test("restart authorization rejects a replacement Codex generation", () => {
+  assert.doesNotThrow(() => assertAuthorizedRestartGeneration({ generation: "expected" }, "expected"));
+  assert.throws(
+    () => assertAuthorizedRestartGeneration({ generation: "replacement" }, "expected"),
+    /changed before the explicit restart/
+  );
+});
+
+test("restart authorization stays pinned to the approved Codex installation", () => {
+  const authorization = {
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT"
+  };
+  assert.doesNotThrow(() => assertAuthorizedRestartInstallation({
+    appPath: authorization.expectedAppPath,
+    executablePath: authorization.expectedExecutablePath
+  }, authorization));
+  assert.throws(() => assertAuthorizedRestartInstallation({
+    appPath: "/Users/tester/Applications/Codex.app",
+    executablePath: "/Users/tester/Applications/Codex.app/Contents/MacOS/ChatGPT"
+  }, authorization), /installation changed before the explicit restart/);
+});
+
+test("restart handoffs serialize and persist completed or rejected results", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-handoff-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockPath = join(root, "restart.lock");
+  const firstStatusPath = join(root, "first.json");
+  const secondStatusPath = join(root, "second.json");
+  let releaseFirst!: () => void;
+  let firstEntered!: () => void;
+  const firstCanFinish = new Promise<void>((resolveFinish) => { releaseFirst = resolveFinish; });
+  const firstStarted = new Promise<void>((resolveStarted) => { firstEntered = resolveStarted; });
+  const request = (operationId: string) => ({
+    operationId,
+    expectedPid: 43123,
+    expectedGeneration: "43123:started:/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    requestedAt: "2026-09-18T19:30:00.000Z"
+  });
+
+  const first = runExclusiveRestartHandoff(request("first"), { lockPath, statusPath: firstStatusPath }, async () => {
+    firstEntered();
+    await firstCanFinish;
+  });
+  await firstStarted;
+  assert.equal(await runExclusiveRestartHandoff(request("second"), { lockPath, statusPath: secondStatusPath }, async () => {}), 3);
+  releaseFirst();
+  assert.equal(await first, 0);
+
+  assert.equal(JSON.parse(await readFile(firstStatusPath, "utf8")).status, "completed");
+  assert.equal(JSON.parse(await readFile(secondStatusPath, "utf8")).status, "rejected");
 });
 
 test("bridge and user icon state use the native macOS Application Support root", () => {

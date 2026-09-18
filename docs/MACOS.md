@@ -55,7 +55,7 @@ chmod +x start-codex-deck.sh "Start Codex Deck.command"
 ./start-codex-deck.sh install
 ```
 
-`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It does not restart a normal Codex session already open during first installation and never launches Codex while the app is closed. After you open Codex normally, a later unbridged process must remain stable before it may receive one graceful recovery restart. A global cooldown blocks further automatic recovery across replacement process IDs, preventing restart loops after crashes, power loss, or incomplete app startup.
+`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It does not restart a normal Codex session already open during installation, never launches Codex while the app is closed, and never automatically restarts a running session. If Codex later opens normally without the renderer bridge, task status and usage continue through the normal-launch fallback while renderer-only controls remain unavailable until an explicit bridge-enabled restart.
 
 Update by extracting the new launcher and running `install` again. The stable host identity, optional relay configuration, and user-owned icons are preserved.
 
@@ -65,11 +65,12 @@ Update by extracting the new launcher and running `install` again. The stable ho
 ./start-codex-deck.sh dry-run
 ./start-codex-deck.sh self-test
 ./start-codex-deck.sh start
+./start-codex-deck.sh start --restart
 ./start-codex-deck.sh install
 ./start-codex-deck.sh uninstall
 ```
 
-`start` asks for an explicit `yes` before restarting an already-running normal Codex session. Codex launches through LaunchServices so Input Monitoring/TCC permissions remain attached to the signed app bundle.
+`start` reuses an existing renderer bridge and otherwise leaves a running normal Codex session untouched. `start --restart` is the explicit restart form. It reports the handoff as accepted, records the eventual completed, rejected, or failed result under `~/Library/Application Support/CodexDeck/restart-handoffs/`, and hands execution to a detached helper before Codex closes. That lets the relaunch finish even when invoked from Codex's integrated terminal. Concurrent requests are serialized, and a stale request cannot close a replacement Codex process. Codex launches through LaunchServices so Input Monitoring/TCC permissions remain attached to the signed app bundle.
 
 ## Files
 
