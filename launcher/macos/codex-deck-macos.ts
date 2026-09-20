@@ -16,6 +16,7 @@ import {
 import { applyRuntimeOverride, verifyMicroRuntime } from "../runtime-override.js";
 import {
   createWatcherPolicyState,
+  DEFAULT_RECOVERY_STARTUP_MS,
   evaluateWatcherPolicy,
   resumeWatcherPolicyState,
   type WatcherPolicyState
@@ -78,20 +79,28 @@ export type RestartHandoffRequest = {
 type RestartAuthorization = Pick<
   RestartHandoffRequest,
   "expectedGeneration" | "expectedAppPath" | "expectedExecutablePath"
->;
+> & { requireLiveProcess?: true; restartDeadline?: number };
 
 export function buildWatcherRecoveryAuthorization(
-  main: { generation: string; installation: Pick<CodexInstallation, "appPath" | "executablePath"> } | null,
+  main: {
+    generation: string;
+    startedAt: string;
+    installation: Pick<CodexInstallation, "appPath" | "executablePath">;
+  } | null,
   expectedGeneration: string
 ): RestartAuthorization {
   if (!main) throw new Error("Codex is no longer running; startup recovery was cancelled.");
   if (main.generation !== expectedGeneration) {
     throw new Error("Codex generation changed before startup recovery; the stale recovery was cancelled.");
   }
+  const startedAt = parseProcessStartedAt(main.startedAt);
+  if (startedAt == null) throw new Error("Codex start time is invalid; startup recovery was cancelled.");
   return {
     expectedGeneration,
     expectedAppPath: main.installation.appPath,
-    expectedExecutablePath: main.installation.executablePath
+    expectedExecutablePath: main.installation.executablePath,
+    requireLiveProcess: true,
+    restartDeadline: startedAt + DEFAULT_RECOVERY_STARTUP_MS
   };
 }
 
@@ -454,6 +463,20 @@ export function assertAuthorizedRestartGeneration(
   }
 }
 
+export function assertAuthorizedRestartReady(
+  main: Pick<MainProcess, "generation"> | null,
+  authorization: Pick<RestartAuthorization, "expectedGeneration" | "requireLiveProcess" | "restartDeadline">,
+  now = Date.now()
+): void {
+  assertAuthorizedRestartGeneration(main, authorization.expectedGeneration);
+  if (authorization.requireLiveProcess && !main) {
+    throw new Error("Codex is no longer running; startup recovery was cancelled.");
+  }
+  if (authorization.restartDeadline != null && now > authorization.restartDeadline) {
+    throw new Error("Codex startup window expired; startup recovery was cancelled.");
+  }
+}
+
 export function assertAuthorizedRestartInstallation(
   installation: Pick<CodexInstallation, "appPath" | "executablePath">,
   authorization: Pick<RestartAuthorization, "expectedAppPath" | "expectedExecutablePath">
@@ -474,7 +497,8 @@ async function authorizedRestartInstallation(authorization: RestartAuthorization
 }
 
 async function liveAuthorizedRestartMain(
-  authorization: RestartAuthorization
+  authorization: RestartAuthorization,
+  allowMissingAfterTermination = false
 ): Promise<{ installation: CodexInstallation; main: MainProcess | null }> {
   const observedMains = await runningCodexMains();
   if (observedMains.length > 1) {
@@ -483,9 +507,10 @@ async function liveAuthorizedRestartMain(
   const observedMain = observedMains[0];
   if (observedMain) {
     assertAuthorizedRestartInstallation(observedMain.installation, authorization);
-    assertAuthorizedRestartGeneration(observedMain, authorization.expectedGeneration);
+    assertAuthorizedRestartReady(observedMain, authorization);
     return { installation: observedMain.installation, main: observedMain };
   }
+  if (!allowMissingAfterTermination) assertAuthorizedRestartReady(null, authorization);
   return { installation: await authorizedRestartInstallation(authorization), main: null };
 }
 
@@ -773,7 +798,7 @@ exit 78
 
 export function buildLaunchAgentPlist(
   runtimePath = INSTALLED_RUNTIME_PATH,
-  nodePath = process.execPath
+  nodePath = selectLaunchAgentNodePath()
 ): string {
   const xml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -801,6 +826,31 @@ export function buildLaunchAgentPlist(
 </dict>
 </plist>
 `;
+}
+
+type NodeVersionProbe = (candidate: string) => string | null;
+
+function probeNodeVersion(candidate: string): string | null {
+  const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 2_000 });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+export function selectLaunchAgentNodePath(
+  candidates = [
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+    "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+    process.execPath
+  ],
+  probe: NodeVersionProbe = probeNodeVersion
+): string {
+  for (const candidate of [...new Set(candidates)]) {
+    const version = probe(candidate);
+    const major = Number.parseInt(version?.match(/^v(\d+)\./)?.[1] ?? "", 10);
+    if (Number.isInteger(major) && major >= 20) return candidate;
+  }
+  throw new Error("Node.js 20 or newer was not found for the Codex Deck LaunchAgent.");
 }
 
 function builtRuntimeSource(): string {
@@ -911,7 +961,7 @@ async function startOnce(allowRestart: boolean, authorization?: RestartAuthoriza
     ? await authorizedRestartInstallation(authorization)
     : await discoverCodexInstallation();
   const main = findMainProcess(installation);
-  if (authorization) assertAuthorizedRestartGeneration(main, authorization.expectedGeneration);
+  if (authorization) assertAuthorizedRestartReady(main, authorization);
   let port = await healthyDebugPort(main);
   if (main && !port && !allowRestart) {
     console.error("Codex is already running without a reusable loopback bridge.");
@@ -928,7 +978,7 @@ async function startOnce(allowRestart: boolean, authorization?: RestartAuthoriza
       ? await liveAuthorizedRestartMain(authorization)
       : { installation, main };
     const immediateMain = authorization ? findMainProcess(live.installation) : live.main;
-    if (authorization) assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+    if (authorization) assertAuthorizedRestartReady(immediateMain, authorization);
     if (immediateMain) await terminateCodex(immediateMain);
     installation = authorization
       ? await authorizedRestartInstallation(authorization)
@@ -938,7 +988,7 @@ async function startOnce(allowRestart: boolean, authorization?: RestartAuthoriza
     port = await chooseLoopbackPort();
     if (authorization) {
       installation = await authorizedRestartInstallation(authorization);
-      const live = await liveAuthorizedRestartMain(authorization);
+      const live = await liveAuthorizedRestartMain(authorization, true);
       if (live.main) throw new Error("The authorized Codex process is still running; a duplicate launch was cancelled.");
       const immediateMain = findMainProcess(installation);
       assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
@@ -1015,10 +1065,31 @@ async function selfTest(): Promise<void> {
   assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a previous healthy bridge never authorizes background restart");
 
   state = createWatcherPolicyState(0);
-  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
+  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false, startedAt: null });
   state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 2_000, generation: "RACE", bridgeHealthy: false });
-  assert.equal(result.action.type, "preserve-initial-session", "LaunchAgent startup race preserves the first normal session");
+  result = evaluateWatcherPolicy(state, {
+    now: 2_000, generation: "RACE", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(result.action, { type: "wait", reason: "launch-agent-startup-grace" },
+    "a newly opened normal session waits for the stability window");
+  state = result.state;
+  result = evaluateWatcherPolicy(state, {
+    now: 12_000, generation: "RACE", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(result.action, { type: "recover-bridge", generation: "RACE" },
+    "a stable newly opened session receives one startup-only recovery");
+
+  const guardedRecovery: RestartAuthorization = {
+    expectedGeneration: "RACE",
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    requireLiveProcess: true,
+    restartDeadline: 30_000
+  };
+  assert.throws(() => assertAuthorizedRestartReady(null, guardedRecovery, 20_000),
+    /no longer running/, "startup recovery never reopens a session the user closed");
+  assert.throws(() => assertAuthorizedRestartReady({ generation: "RACE" }, guardedRecovery, 30_001),
+    /startup window expired/, "startup recovery never crosses its deadline");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-deck-self-test-"));
   const lockPath = join(temporaryRoot, "watcher.lock");

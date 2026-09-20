@@ -55,7 +55,7 @@ chmod +x start-codex-deck.sh "Start Codex Deck.command"
 ./start-codex-deck.sh install
 ```
 
-`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It does not restart a normal Codex session already open during installation, never launches Codex while the app is closed, and never automatically restarts a running session. If Codex later opens normally without the renderer bridge, task status and usage continue through the normal-launch fallback while renderer-only controls remain unavailable until an explicit bridge-enabled restart.
+`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It leaves a normal Codex session already open during installation untouched and never launches Codex while the app is closed. When the running watcher observes a newly opened normal Codex process, it waits ten seconds for that exact process to stabilize, then performs at most one bridge-enabled recovery while the process is still less than 30 seconds old. The recovery is pinned to that process generation, app, and executable; it is cancelled if the process closes, is replaced, or ages past the startup window. Established sessions are never restarted in the background. Task status and usage remain available through the normal-launch fallback whenever renderer-only controls are unavailable.
 
 Update by extracting the new launcher and running `install` again. The stable host identity, optional relay configuration, and user-owned icons are preserved.
 
@@ -77,7 +77,6 @@ Update by extracting the new launcher and running `install` again. The stable ho
 ```text
 ~/Library/Application Support/CodexDeck/
   codex-deck-macos.mjs
-  watcher-launch.sh
   codex-micro-bridge.json
   host.json
   watcher-state.json

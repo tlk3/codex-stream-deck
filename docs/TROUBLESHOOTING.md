@@ -30,11 +30,14 @@ tail -n 100 "$HOME/Library/Application Support/CodexDeck/watcher.log"
 
 Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existing normal session needs a restart, save active work and run `./start-codex-deck.sh start --restart`. The command reports when the restart is accepted; its detached helper records the eventual result under `~/Library/Application Support/CodexDeck/restart-handoffs/`. The relaunch can therefore finish even when the command was entered in Codex's integrated terminal.
 
-The installed macOS watcher never launches a closed Codex app or automatically
-restarts a running one. Normal launches can provide recent task status/navigation
-and account usage through the [normal-launch fallback](DESKTOP_IPC.md), but not
-Model Preset or native Action controls. Those still need a renderer-enabled
-session, requested explicitly when it is safe to restart Codex.
+The installed macOS watcher never launches a closed Codex app or restarts an
+established session. If it was already running when a new normal Codex process
+opened, it can perform one bridge-enabled recovery after a ten-second stability
+check and only while that exact process is less than 30 seconds old. The recovery
+is cancelled if Codex closes, is replaced, or crosses the deadline. Normal
+launches still provide recent task status/navigation and account usage through
+the [normal-launch fallback](DESKTOP_IPC.md) while renderer-only controls are
+temporarily unavailable.
 
 ## Dials show Unavailable although task status works
 

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import {
   assertAuthorizedRestartGeneration,
   assertAuthorizedRestartInstallation,
+  assertAuthorizedRestartReady,
   buildWatcherRecoveryAuthorization,
   buildCodexLaunchSpec,
   buildCodexRestartHandoffSpec,
@@ -16,6 +17,7 @@ import {
   parseDebugPort,
   parseProcessStartedAt,
   runExclusiveRestartHandoff,
+  selectLaunchAgentNodePath,
   spawnDetachedRestartHandoff
 } from "../launcher/macos/codex-deck-macos.js";
 import { codexDeckStateRoot } from "../src/codex-deck-paths.js";
@@ -107,6 +109,7 @@ test("restart authorization stays pinned to the approved Codex installation", ()
 test("watcher startup recovery is pinned to the exact observed Codex generation", () => {
   const main = {
     pid: 43123,
+    startedAt: "Sun Sep 20 11:16:51 2026",
     generation: "43123:started:/Applications/Codex.app/Contents/MacOS/ChatGPT",
     installation: {
       appPath: "/Applications/Codex.app",
@@ -116,10 +119,43 @@ test("watcher startup recovery is pinned to the exact observed Codex generation"
   assert.deepEqual(buildWatcherRecoveryAuthorization(main, main.generation), {
     expectedGeneration: main.generation,
     expectedAppPath: main.installation.appPath,
-    expectedExecutablePath: main.installation.executablePath
+    expectedExecutablePath: main.installation.executablePath,
+    requireLiveProcess: true,
+    restartDeadline: Date.parse(main.startedAt) + 30_000
   });
   assert.throws(() => buildWatcherRecoveryAuthorization(main, "replacement"), /generation changed/);
   assert.throws(() => buildWatcherRecoveryAuthorization(null, main.generation), /no longer running/);
+});
+
+test("watcher recovery cancels when Codex disappears or crosses the startup deadline", () => {
+  const authorization = {
+    expectedGeneration: "43123:started:/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    requireLiveProcess: true as const,
+    restartDeadline: 30_000
+  };
+  assert.throws(() => assertAuthorizedRestartReady(null, authorization, 20_000), /no longer running/);
+  assert.throws(() => assertAuthorizedRestartReady({
+    generation: authorization.expectedGeneration
+  }, authorization, 30_001), /startup window expired/);
+  assert.doesNotThrow(() => assertAuthorizedRestartReady({
+    generation: authorization.expectedGeneration
+  }, authorization, 30_000));
+});
+
+test("LaunchAgent selection prefers a validated durable Node path", () => {
+  const attempts: string[] = [];
+  const selected = selectLaunchAgentNodePath(
+    ["/opt/homebrew/bin/node", "/versioned/node"],
+    (candidate) => {
+      attempts.push(candidate);
+      return candidate === "/opt/homebrew/bin/node" ? "v22.22.0" : "v24.0.0";
+    }
+  );
+  assert.equal(selected, "/opt/homebrew/bin/node");
+  assert.deepEqual(attempts, ["/opt/homebrew/bin/node"]);
+  assert.throws(() => selectLaunchAgentNodePath(["/old/node"], () => "v18.0.0"), /Node.js 20 or newer/);
 });
 
 test("restart handoffs serialize and persist completed or rejected results", async (t) => {
