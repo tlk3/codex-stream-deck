@@ -136,7 +136,6 @@ export class CodexDesktopIpcBridge {
   }
 
   async refresh(forceUsageRefresh = false): Promise<MicroSnapshot> {
-    await this.options.verifyApp();
     let threads: Thread[];
     let catalogReadSucceeded = false;
     try {
@@ -231,6 +230,7 @@ export class CodexDesktopIpcBridge {
   }
 
   private async connectOnce(): Promise<void> {
+    await this.options.verifyApp();
     const [parent, entry] = await Promise.all([lstat(dirname(this.options.socketPath)), lstat(this.options.socketPath)]);
     const uid = process.getuid?.();
     if (uid == null || !parent.isDirectory() || parent.uid !== uid || (parent.mode & 0o022) !== 0 ||

@@ -48,6 +48,7 @@ test("normal-launch IPC supplies live slots and clears them on disconnect; recon
   const path = join(dir, "ipc.sock");
   const peers = new Set<net.Socket>();
   let subscriptions = 0;
+  let appVerifications = 0;
   let revision = 1;
   const server = net.createServer(socket => {
     peers.add(socket); socket.on("close", () => peers.delete(socket));
@@ -72,7 +73,7 @@ test("normal-launch IPC supplies live slots and clears them on disconnect; recon
   await new Promise<void>(resolve => server.listen(path, resolve));
   const bridge = new CodexDesktopIpcBridge(() => {}, { socketPath: path,
     readThreads: async () => [{ id: threadId, title: "Stored task", activityAt: 100 }],
-    verifyApp: async () => {} }, { read: async () => undefined, close() {} });
+    verifyApp: async () => { appVerifications++; } }, { read: async () => undefined, close() {} });
   try {
     const snapshot = await bridge.refresh();
     assert.equal(snapshot.slots[0]?.status, "working");
@@ -97,6 +98,7 @@ test("normal-launch IPC supplies live slots and clears them on disconnect; recon
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal((await bridge.refresh()).slots[0]?.status, "working");
     assert.equal(subscriptions, 2);
+    assert.equal(appVerifications, 2, "process verification runs once per IPC connection, not every refresh");
   } finally {
     bridge.close();
     for (const socket of peers) socket.destroy();
