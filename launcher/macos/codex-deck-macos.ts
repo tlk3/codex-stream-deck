@@ -40,6 +40,8 @@ const WATCHER_LAUNCHER_PATH = join(STATE_ROOT, "watcher-launch.sh");
 const LAUNCH_AGENT_PATH = join(homedir(), "Library", "LaunchAgents", `${AGENT_LABEL}.plist`);
 const POLL_MS = 1_000;
 const LOG_LIMIT_BYTES = 1_000_000;
+const CODEX_TERMINATION_TIMEOUT_MS = 15_000;
+const WATCHER_RECOVERY_LAUNCH_MARGIN_MS = 2_000;
 
 type CodexInstallation = {
   appPath: string;
@@ -403,7 +405,7 @@ async function launchCodex(installation: CodexInstallation, port: number): Promi
 
 async function terminateCodex(main: MainProcess): Promise<void> {
   process.kill(main.pid, "SIGTERM");
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + CODEX_TERMINATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try { process.kill(main.pid, 0); }
     catch { return; }
@@ -475,6 +477,39 @@ export function assertAuthorizedRestartReady(
   if (authorization.restartDeadline != null && now > authorization.restartDeadline) {
     throw new Error("Codex startup window expired; startup recovery was cancelled.");
   }
+}
+
+function assertAuthorizedRestartDeadline(
+  authorization: Pick<RestartAuthorization, "restartDeadline">,
+  now: number
+): void {
+  if (authorization.restartDeadline != null && now > authorization.restartDeadline) {
+    throw new Error("Codex startup window expired; startup recovery was cancelled.");
+  }
+}
+
+export async function runGuardedWatcherRecovery(
+  main: Pick<MainProcess, "generation">,
+  authorization: RestartAuthorization,
+  operations: {
+    now: () => number;
+    terminate: () => Promise<void>;
+    confirmAbsent: () => Promise<void>;
+    launch: () => Promise<void>;
+  }
+): Promise<void> {
+  const startedAt = operations.now();
+  assertAuthorizedRestartReady(main, authorization, startedAt);
+  const minimumRemaining = CODEX_TERMINATION_TIMEOUT_MS + WATCHER_RECOVERY_LAUNCH_MARGIN_MS;
+  if (authorization.restartDeadline == null || authorization.restartDeadline - startedAt < minimumRemaining) {
+    throw new Error("Codex startup recovery has insufficient time remaining; recovery was cancelled.");
+  }
+  await operations.terminate();
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  await operations.confirmAbsent();
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  await operations.launch();
 }
 
 export function assertAuthorizedRestartInstallation(
@@ -971,6 +1006,27 @@ async function startOnce(allowRestart: boolean, authorization?: RestartAuthoriza
   if (main && !port && allowRestart && !authorization) {
     const handoff = await handoffCodexRestart(main);
     console.log(`Codex Deck restart accepted as ${handoff.operationId}; completion will be recorded in ${handoff.statusPath}.`);
+    return 0;
+  }
+  if (main && !port && authorization?.requireLiveProcess) {
+    port = await chooseLoopbackPort();
+    let recoveryInstallation = installation;
+    await runGuardedWatcherRecovery(main, authorization, {
+      now: Date.now,
+      terminate: async () => { await terminateCodex(main); },
+      confirmAbsent: async () => {
+        recoveryInstallation = await authorizedRestartInstallation(authorization);
+        const live = await liveAuthorizedRestartMain(authorization, true);
+        if (live.main) throw new Error("The authorized Codex process is still running; startup recovery was cancelled.");
+        const immediateMain = findMainProcess(recoveryInstallation);
+        assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+        if (immediateMain) throw new Error("The authorized Codex process reappeared; startup recovery was cancelled.");
+      },
+      launch: async () => { await launchCodex(recoveryInstallation, port!); }
+    });
+    const result = await enableBridge(recoveryInstallation, port);
+    console.log(`Codex Deck ready on 127.0.0.1:${port}.`);
+    console.log(JSON.stringify(result, null, 2));
     return 0;
   }
   if (main && !port) {

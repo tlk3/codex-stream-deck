@@ -17,6 +17,7 @@ import {
   parseDebugPort,
   parseProcessStartedAt,
   runExclusiveRestartHandoff,
+  runGuardedWatcherRecovery,
   selectLaunchAgentNodePath,
   spawnDetachedRestartHandoff
 } from "../launcher/macos/codex-deck-macos.js";
@@ -142,6 +143,45 @@ test("watcher recovery cancels when Codex disappears or crosses the startup dead
   assert.doesNotThrow(() => assertAuthorizedRestartReady({
     generation: authorization.expectedGeneration
   }, authorization, 30_000));
+});
+
+test("guarded watcher recovery never starts late or launches after its deadline", async () => {
+  const authorization = {
+    expectedGeneration: "B",
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    requireLiveProcess: true as const,
+    restartDeadline: 30_000
+  };
+  const main = { generation: "B" };
+  const calls: string[] = [];
+  const validTimes = [10_000, 20_000, 21_000, 22_000];
+  await runGuardedWatcherRecovery(main, authorization, {
+    now: () => validTimes.shift()!,
+    terminate: async () => { calls.push("terminate"); },
+    confirmAbsent: async () => { calls.push("confirm-absent"); },
+    launch: async () => { calls.push("launch"); }
+  });
+  assert.deepEqual(calls, ["terminate", "confirm-absent", "launch"]);
+
+  calls.length = 0;
+  const crossingTimes = [10_000, 30_001];
+  await assert.rejects(runGuardedWatcherRecovery(main, authorization, {
+    now: () => crossingTimes.shift()!,
+    terminate: async () => { calls.push("terminate"); },
+    confirmAbsent: async () => { calls.push("confirm-absent"); },
+    launch: async () => { calls.push("launch"); }
+  }), /startup window expired/);
+  assert.deepEqual(calls, ["terminate"], "a deadline crossing never verifies or launches late");
+
+  calls.length = 0;
+  await assert.rejects(runGuardedWatcherRecovery(main, authorization, {
+    now: () => 14_000,
+    terminate: async () => { calls.push("terminate"); },
+    confirmAbsent: async () => { calls.push("confirm-absent"); },
+    launch: async () => { calls.push("launch"); }
+  }), /insufficient time/);
+  assert.deepEqual(calls, [], "recovery never signals Codex without the full shutdown budget remaining");
 });
 
 test("LaunchAgent selection prefers a validated durable Node path", () => {
