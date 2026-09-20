@@ -792,8 +792,6 @@ export function buildLaunchAgentPlist(
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>

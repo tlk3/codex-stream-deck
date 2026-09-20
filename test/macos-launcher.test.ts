@@ -184,6 +184,8 @@ test("LaunchAgent executes the validated Node runtime directly without a shell",
   assert.match(plist, /<string>watch<\/string>/);
   assert.doesNotMatch(plist, /<string>\/bin\/zsh<\/string>/);
   assert.doesNotMatch(plist, /watcher-launch\.sh/);
+  assert.doesNotMatch(plist, /<key>ProcessType<\/key>/);
+  assert.doesNotMatch(plist, /<string>Background<\/string>/);
   assert.match(plist, /watcher\.stderr\.log/);
   assert.doesNotMatch(plist, /\.nvm\/versions\/node\/v\d/);
 });
