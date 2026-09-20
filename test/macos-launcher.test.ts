@@ -139,9 +139,9 @@ test("bridge and user icon state use the native macOS Application Support root",
   );
 });
 
-test("LaunchAgent uses a dynamic Node resolver instead of pinning an NVM version", () => {
+test("LaunchAgent executes the validated Node runtime directly without a shell", () => {
   const launcher = buildWatcherLaunchScript("/tmp/Codex Deck/runtime.mjs");
-  const plist = buildLaunchAgentPlist("/tmp/Codex Deck/watcher-launch.sh");
+  const plist = buildLaunchAgentPlist("/tmp/Codex Deck/runtime.mjs", "/opt/homebrew/bin/node");
   assert.match(launcher, /\/opt\/homebrew\/bin\/node/);
   assert.match(launcher, /\/usr\/local\/bin\/node/);
   assert.match(launcher, /\.nvm\/versions\/node\/\*\/bin\/node/);
@@ -153,8 +153,11 @@ test("LaunchAgent uses a dynamic Node resolver instead of pinning an NVM version
   assert.ok(launcher.indexOf("/usr/bin/mdfind") > launcher.indexOf('for node_candidate in "${candidates[@]}"'));
   assert.match(launcher, /\/bin\/kill -KILL/);
   assert.match(launcher, /Node\.js 20 or newer/);
-  assert.match(plist, /<string>\/bin\/zsh<\/string>/);
-  assert.match(plist, /watcher-launch\.sh/);
+  assert.match(plist, /<string>\/opt\/homebrew\/bin\/node<\/string>/);
+  assert.match(plist, /<string>\/tmp\/Codex Deck\/runtime\.mjs<\/string>/);
+  assert.match(plist, /<string>watch<\/string>/);
+  assert.doesNotMatch(plist, /<string>\/bin\/zsh<\/string>/);
+  assert.doesNotMatch(plist, /watcher-launch\.sh/);
   assert.match(plist, /watcher\.stderr\.log/);
   assert.doesNotMatch(plist, /\.nvm\/versions\/node\/v\d/);
 });

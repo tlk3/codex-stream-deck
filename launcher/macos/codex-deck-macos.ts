@@ -742,7 +742,10 @@ exit 78
 `;
 }
 
-export function buildLaunchAgentPlist(watcherLauncherPath = WATCHER_LAUNCHER_PATH): string {
+export function buildLaunchAgentPlist(
+  runtimePath = INSTALLED_RUNTIME_PATH,
+  nodePath = process.execPath
+): string {
   const xml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -752,8 +755,9 @@ export function buildLaunchAgentPlist(watcherLauncherPath = WATCHER_LAUNCHER_PAT
   <string>${AGENT_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>${xml(watcherLauncherPath)}</string>
+    <string>${xml(nodePath)}</string>
+    <string>${xml(runtimePath)}</string>
+    <string>watch</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -794,8 +798,8 @@ async function installLaunchAgent(): Promise<void> {
   await copyFile(source, temporaryRuntime);
   await chmod(temporaryRuntime, 0o700);
   await rename(temporaryRuntime, INSTALLED_RUNTIME_PATH);
-  await atomicWrite(WATCHER_LAUNCHER_PATH, buildWatcherLaunchScript(), 0o700);
   await atomicWrite(LAUNCH_AGENT_PATH, buildLaunchAgentPlist(), 0o644);
+  await rm(WATCHER_LAUNCHER_PATH, { force: true });
   await hostState();
   run("/bin/launchctl", ["bootout", `gui/${currentUserId()}`, LAUNCH_AGENT_PATH], { allowFailure: true });
   run("/bin/launchctl", ["bootstrap", `gui/${currentUserId()}`, LAUNCH_AGENT_PATH]);
