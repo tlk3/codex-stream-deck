@@ -2,11 +2,13 @@ export type WatcherObservation = {
   now: number;
   generation: string | null;
   bridgeHealthy: boolean;
+  startedAt?: number | null;
 };
 
 export type WatcherAction =
   | { type: "preserve-initial-session" }
   | { type: "reuse-bridge" }
+  | { type: "recover-bridge"; generation: string }
   | { type: "wait"; reason: string };
 
 export type WatcherPolicyState = {
@@ -69,7 +71,7 @@ export function evaluateWatcherPolicy(
     ...state,
     recoveryAttempts: [...state.recoveryAttempts]
   };
-  const { now, generation, bridgeHealthy } = observation;
+  const { now, generation, bridgeHealthy, startedAt } = observation;
 
   if (!state.initialized) {
     next.initialized = true;
@@ -120,7 +122,8 @@ export function evaluateWatcherPolicy(
     return { state: next, action: { type: "wait", reason: "bridge-startup-pending" } };
   }
 
-  if (previousGeneration == null && next.suppressedInitialGeneration == null && !next.hadHealthyBridge && now < next.startupGraceUntil) {
+  if (previousGeneration == null && !observedStoppedInterval && next.suppressedInitialGeneration == null &&
+      !next.hadHealthyBridge && now < next.startupGraceUntil) {
     next.suppressedInitialGeneration = generation;
     return { state: next, action: { type: "preserve-initial-session" } };
   }
@@ -135,6 +138,17 @@ export function evaluateWatcherPolicy(
 
   if (next.unbridgedSince == null || now - next.unbridgedSince < DEFAULT_UNBRIDGED_STABLE_MS) {
     return { state: next, action: { type: "wait", reason: "confirm-stable-unbridged-generation" } };
+  }
+  const processAge = typeof startedAt === "number" && Number.isFinite(startedAt) ? now - startedAt : Infinity;
+  const startupRecoveryEligible = generation !== next.suppressedInitialGeneration &&
+    processAge >= 0 && processAge <= DEFAULT_RECOVERY_STARTUP_MS &&
+    now >= next.recoveryCooldownUntil && !next.recoveryAttempts.includes(generation);
+  if (startupRecoveryEligible) {
+    next.recoveryAttempts.push(generation);
+    next.recoveryAttempts = next.recoveryAttempts.slice(-16);
+    next.recoveryPendingUntil = now + DEFAULT_RECOVERY_STARTUP_MS;
+    next.recoveryCooldownUntil = now + DEFAULT_RECOVERY_COOLDOWN_MS;
+    return { state: next, action: { type: "recover-bridge", generation } };
   }
   return { state: next, action: { type: "wait", reason: "bridge-unavailable-degraded" } };
 }

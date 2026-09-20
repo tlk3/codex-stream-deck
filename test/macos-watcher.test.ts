@@ -65,6 +65,37 @@ test("an observed stopped interval never auto-launches Codex", () => {
   assert.deepEqual(result.action, { type: "wait", reason: "codex-not-running" });
 });
 
+test("a newly opened normal Codex session gets one startup-only bridge recovery", () => {
+  let result = evaluateWatcherPolicy(createWatcherPolicyState(0), {
+    now: 0, generation: null, bridgeHealthy: false, startedAt: null
+  });
+  result = evaluateWatcherPolicy(result.state, {
+    now: 100_000, generation: "B", bridgeHealthy: false, startedAt: 100_000
+  });
+  assert.deepEqual(result.action, { type: "wait", reason: "confirm-stable-unbridged-generation" });
+  result = evaluateWatcherPolicy(result.state, {
+    now: 110_000, generation: "B", bridgeHealthy: false, startedAt: 100_000
+  });
+  assert.deepEqual(result.action, { type: "recover-bridge", generation: "B" });
+  result = evaluateWatcherPolicy(result.state, {
+    now: 111_000, generation: "B", bridgeHealthy: false, startedAt: 100_000
+  });
+  assert.notEqual(result.action.type, "recover-bridge", "the same generation is never restarted twice");
+});
+
+test("an older unbridged Codex session is never restarted as startup recovery", () => {
+  let result = evaluateWatcherPolicy(createWatcherPolicyState(0), {
+    now: 0, generation: null, bridgeHealthy: false, startedAt: null
+  });
+  result = evaluateWatcherPolicy(result.state, {
+    now: 100_000, generation: "OLD", bridgeHealthy: false, startedAt: 1_000
+  });
+  result = evaluateWatcherPolicy(result.state, {
+    now: 110_000, generation: "OLD", bridgeHealthy: false, startedAt: 1_000
+  });
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" });
+});
+
 test("previous healthy bridge stays degraded after app update replacement", () => {
   let result = evaluateWatcherPolicy(createWatcherPolicyState(0), {
     now: 0, generation: "A:/Applications/Old.app", bridgeHealthy: true
@@ -90,12 +121,18 @@ test("replacement generations never enter an automatic recovery circuit", () => 
   assert.deepEqual(result.action, { type: "wait", reason: "confirm-stable-unbridged-generation" });
 });
 
-test("LaunchAgent startup race waits, preserves a fresh install, and recovers prior bridge state", () => {
+test("LaunchAgent startup race recovers only when it observed Codex was initially stopped", () => {
   let fresh = evaluateWatcherPolicy(createWatcherPolicyState(0), {
-    now: 0, generation: null, bridgeHealthy: false
+    now: 0, generation: null, bridgeHealthy: false, startedAt: null
   });
-  fresh = evaluateWatcherPolicy(fresh.state, { now: 2_000, generation: "LOGIN", bridgeHealthy: false });
-  assert.equal(fresh.action.type, "preserve-initial-session");
+  fresh = evaluateWatcherPolicy(fresh.state, {
+    now: 2_000, generation: "LOGIN", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(fresh.action, { type: "wait", reason: "launch-agent-startup-grace" });
+  fresh = evaluateWatcherPolicy(fresh.state, {
+    now: 12_000, generation: "LOGIN", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(fresh.action, { type: "recover-bridge", generation: "LOGIN" });
 
   let prior = evaluateWatcherPolicy(createWatcherPolicyState(0), {
     now: 0, generation: "OLD", bridgeHealthy: true

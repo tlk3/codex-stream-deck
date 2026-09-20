@@ -8,11 +8,13 @@ import { promisify } from "node:util";
 import {
   assertAuthorizedRestartGeneration,
   assertAuthorizedRestartInstallation,
+  buildWatcherRecoveryAuthorization,
   buildCodexLaunchSpec,
   buildCodexRestartHandoffSpec,
   buildLaunchAgentPlist,
   buildWatcherLaunchScript,
   parseDebugPort,
+  parseProcessStartedAt,
   runExclusiveRestartHandoff,
   spawnDetachedRestartHandoff
 } from "../launcher/macos/codex-deck-macos.js";
@@ -39,6 +41,12 @@ test("macOS launcher validates ports and parses both supported flag forms", () =
   assert.equal(parseDebugPort("Codex --remote-debugging-port=43123"), 43123);
   assert.equal(parseDebugPort("Codex --remote-debugging-port 43124"), 43124);
   assert.equal(parseDebugPort("Codex --remote-debugging-port=70000"), null);
+});
+
+test("watcher parses process start time and fails closed on invalid timestamps", () => {
+  const value = "Sun Sep 20 11:16:51 2026";
+  assert.equal(parseProcessStartedAt(value), Date.parse(value));
+  assert.equal(parseProcessStartedAt("not-a-process-time"), null);
 });
 
 test("macOS restart handoff survives the Codex terminal that requested it", () => {
@@ -94,6 +102,24 @@ test("restart authorization stays pinned to the approved Codex installation", ()
     appPath: "/Users/tester/Applications/Codex.app",
     executablePath: "/Users/tester/Applications/Codex.app/Contents/MacOS/ChatGPT"
   }, authorization), /installation changed before the explicit restart/);
+});
+
+test("watcher startup recovery is pinned to the exact observed Codex generation", () => {
+  const main = {
+    pid: 43123,
+    generation: "43123:started:/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    installation: {
+      appPath: "/Applications/Codex.app",
+      executablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT"
+    }
+  };
+  assert.deepEqual(buildWatcherRecoveryAuthorization(main, main.generation), {
+    expectedGeneration: main.generation,
+    expectedAppPath: main.installation.appPath,
+    expectedExecutablePath: main.installation.executablePath
+  });
+  assert.throws(() => buildWatcherRecoveryAuthorization(main, "replacement"), /generation changed/);
+  assert.throws(() => buildWatcherRecoveryAuthorization(null, main.generation), /no longer running/);
 });
 
 test("restart handoffs serialize and persist completed or rejected results", async (t) => {

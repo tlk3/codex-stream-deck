@@ -80,6 +80,21 @@ type RestartAuthorization = Pick<
   "expectedGeneration" | "expectedAppPath" | "expectedExecutablePath"
 >;
 
+export function buildWatcherRecoveryAuthorization(
+  main: { generation: string; installation: Pick<CodexInstallation, "appPath" | "executablePath"> } | null,
+  expectedGeneration: string
+): RestartAuthorization {
+  if (!main) throw new Error("Codex is no longer running; startup recovery was cancelled.");
+  if (main.generation !== expectedGeneration) {
+    throw new Error("Codex generation changed before startup recovery; the stale recovery was cancelled.");
+  }
+  return {
+    expectedGeneration,
+    expectedAppPath: main.installation.appPath,
+    expectedExecutablePath: main.installation.executablePath
+  };
+}
+
 type RestartHandoffStatus = RestartHandoffRequest & {
   status: "accepted" | "running" | "completed" | "rejected" | "failed";
   updatedAt: string;
@@ -205,6 +220,11 @@ function findMainProcessInRows(installation: CodexInstallation, rows: ReturnType
 
 function findMainProcess(installation: CodexInstallation): MainProcess | null {
   return findMainProcessInRows(installation, processRows());
+}
+
+export function parseProcessStartedAt(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 async function runningCodexMains(): Promise<MainProcess[]> {
@@ -576,10 +596,19 @@ async function runWatcher(): Promise<number> {
         const main = findMainProcess(installation);
         const port = await healthyDebugPort(main);
         const decision = evaluateWatcherPolicy(policy, {
-          now: Date.now(), generation: main?.generation ?? null, bridgeHealthy: port != null
+          now: Date.now(), generation: main?.generation ?? null, bridgeHealthy: port != null,
+          startedAt: main ? parseProcessStartedAt(main.startedAt) : null
         });
         policy = decision.state;
         await atomicWriteJson(WATCHER_STATE_PATH, policy);
+
+        if (decision.action.type === "recover-bridge") {
+          const authorization = buildWatcherRecoveryAuthorization(main, decision.action.generation);
+          await log(`Recovering a newly opened Codex session without a loopback bridge (${decision.action.generation}).`);
+          await startOnce(true, authorization);
+          await log(`Startup bridge recovery completed for ${decision.action.generation}.`);
+          continue;
+        }
 
         const relayConfig = await readJson<RelayServerConfig>(RELAY_SERVER_CONFIG_PATH);
         const mobileLocalConfig = await readJson<RelayServerConfig>(MOBILE_LOCAL_CONFIG_PATH);
