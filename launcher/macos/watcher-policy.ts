@@ -27,7 +27,8 @@ export type WatcherPolicyState = {
 
 export const DEFAULT_STARTUP_GRACE_MS = 30_000;
 export const DEFAULT_UNBRIDGED_STABLE_MS = 10_000;
-export const DEFAULT_RECOVERY_STARTUP_MS = 30_000;
+export const DEFAULT_RECOVERY_TRIGGER_MS = 30_000;
+export const DEFAULT_RECOVERY_COMPLETION_MS = 60_000;
 export const DEFAULT_RECOVERY_COOLDOWN_MS = 10 * 60_000;
 
 export function createWatcherPolicyState(now = Date.now()): WatcherPolicyState {
@@ -141,12 +142,12 @@ export function evaluateWatcherPolicy(
   }
   const processAge = typeof startedAt === "number" && Number.isFinite(startedAt) ? now - startedAt : Infinity;
   const startupRecoveryEligible = generation !== next.suppressedInitialGeneration &&
-    processAge >= 0 && processAge <= DEFAULT_RECOVERY_STARTUP_MS &&
+    processAge >= 0 && processAge <= DEFAULT_RECOVERY_TRIGGER_MS &&
     now >= next.recoveryCooldownUntil && !next.recoveryAttempts.includes(generation);
   if (startupRecoveryEligible) {
     next.recoveryAttempts.push(generation);
     next.recoveryAttempts = next.recoveryAttempts.slice(-16);
-    next.recoveryPendingUntil = now + DEFAULT_RECOVERY_STARTUP_MS;
+    next.recoveryPendingUntil = now + DEFAULT_RECOVERY_COMPLETION_MS;
     next.recoveryCooldownUntil = now + DEFAULT_RECOVERY_COOLDOWN_MS;
     return { state: next, action: { type: "recover-bridge", generation } };
   }

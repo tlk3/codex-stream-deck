@@ -24,8 +24,10 @@ but spending credits remains unavailable without the native applicability check.
 The helper has bounded output and a ten-second timeout; only its own child process
 is terminated after the read. Account errors clear usage without degrading a
 connected task bridge. No desktop restart, alternate launcher, credential entry,
-or Codex settings change is required. This macOS fallback currently expects the
-bundled executable at `/Applications/Codex.app/Contents/Resources/codex`.
+or Codex settings change is required. Current macOS builds place the bundled
+executable at `/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`;
+Codex Deck retains `/Applications/Codex.app/Contents/Resources/codex` as a
+compatibility fallback for older builds.
 
 The IPC fallback does **not** expose active composer authority. Model presets,
 reasoning, native action keys and joystick/encoder commands still

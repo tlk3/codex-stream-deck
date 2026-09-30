@@ -3,7 +3,11 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { CodexAppServerUsageReader, normalizeAppServerUsage } from "../src/codex-app-server-usage.js";
+import {
+  CodexAppServerUsageReader,
+  normalizeAppServerUsage,
+  resolveCodexAppServerExecutable
+} from "../src/codex-app-server-usage.js";
 
 const bucket = {
   limitId: "codex", limitName: null,
@@ -16,6 +20,16 @@ const response = {
   rateLimitsByLimitId: { codex: bucket, codex_bengalfox: { ...bucket, primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1789072971 } } },
   rateLimitResetCredits: { availableCount: 1, credits: [] }, accountId: "test-account", rateLimitUpsell: null
 };
+
+test("resolves the bundled Codex helper after the desktop app moves it under codex-cli", () => {
+  const available = new Set([
+    "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+  ]);
+  assert.equal(resolveCodexAppServerExecutable((candidate) => available.has(candidate)),
+    "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+  assert.equal(resolveCodexAppServerExecutable((candidate) => candidate.endsWith("/Resources/codex")),
+    "/Applications/Codex.app/Contents/Resources/codex");
+});
 
 test("normalizes the Codex bucket without borrowing Spark windows or inventing reset applicability", () => {
   assert.deepEqual(normalizeAppServerUsage(response, 1000), {
@@ -68,13 +82,23 @@ function normalReply(request: Record<string, unknown>, child: FakeChild): void {
 test("reader sends only initialization and read-only usage RPCs and closes its own child", async () => {
   const child = fakeServer(normalReply);
   const reader = new CodexAppServerUsageReader({ spawnChild: (exe, args) => {
-    assert.equal(exe, "/Applications/Codex.app/Contents/Resources/codex");
+    assert.equal(exe, "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
     assert.deepEqual(args, ["app-server", "--stdio"]);
     return child.asChild();
-  }, now: () => 1000 });
+  }, pathExists: (candidate) => candidate.includes("/codex-cli/"), now: () => 1000 });
   assert.equal((await reader.read())?.windows[0]?.remainingPercent, 54);
   assert.deepEqual(child.messages.map((message) => message.method), ["initialize", "initialized", "account/rateLimits/read"]);
   assert.deepEqual(child.kills, ["SIGTERM"]);
+  reader.close();
+});
+
+test("reader uses the legacy bundled helper when the new app layout is absent", async () => {
+  const child = fakeServer(normalReply);
+  const reader = new CodexAppServerUsageReader({ spawnChild: (exe) => {
+    assert.equal(exe, "/Applications/Codex.app/Contents/Resources/codex");
+    return child.asChild();
+  }, pathExists: (candidate) => candidate.endsWith("/Resources/codex"), now: () => 1000 });
+  assert.equal((await reader.read())?.windows[0]?.remainingPercent, 54);
   reader.close();
 });
 

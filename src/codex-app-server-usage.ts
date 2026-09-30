@@ -1,9 +1,22 @@
 import type { UsageSnapshot, UsageWindow } from "./types.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+
+const CODEX_APP_SERVER_EXECUTABLES = [
+  "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "/Applications/Codex.app/Contents/Resources/codex"
+] as const;
+
+export function resolveCodexAppServerExecutable(
+  pathExists: (candidate: string) => boolean = existsSync
+): string {
+  return CODEX_APP_SERVER_EXECUTABLES.find(pathExists) ?? CODEX_APP_SERVER_EXECUTABLES[0];
+}
 
 type ReaderOptions = {
   log?: (message: string) => void;
   spawnChild?: (executable: string, args: string[]) => ChildProcessWithoutNullStreams;
+  pathExists?: (candidate: string) => boolean;
   now?: () => number;
   timeoutMs?: number;
 };
@@ -66,7 +79,7 @@ export class CodexAppServerUsageReader {
       try {
         child = (this.options.spawnChild ?? ((executable, args) => spawn(executable, args, {
           stdio: ["pipe", "pipe", "pipe"], windowsHide: true
-        })))("/Applications/Codex.app/Contents/Resources/codex", ["app-server", "--stdio"]);
+        })))(resolveCodexAppServerExecutable(this.options.pathExists), ["app-server", "--stdio"]);
       } catch {
         reject(new Error("Codex usage helper could not start."));
         return;

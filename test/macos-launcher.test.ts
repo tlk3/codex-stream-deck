@@ -122,10 +122,32 @@ test("watcher startup recovery is pinned to the exact observed Codex generation"
     expectedAppPath: main.installation.appPath,
     expectedExecutablePath: main.installation.executablePath,
     requireLiveProcess: true,
-    restartDeadline: Date.parse(main.startedAt) + 30_000
+    restartDeadline: Date.parse(main.startedAt) + 60_000
   });
   assert.throws(() => buildWatcherRecoveryAuthorization(main, "replacement"), /generation changed/);
   assert.throws(() => buildWatcherRecoveryAuthorization(null, main.generation), /no longer running/);
+});
+
+test("startup recovery triggered after stabilization retains the full guarded shutdown budget", async () => {
+  const main = {
+    pid: 43123,
+    startedAt: "Sun Sep 20 11:16:51 2026",
+    generation: "43123:started:/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    installation: {
+      appPath: "/Applications/Codex.app",
+      executablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT"
+    }
+  };
+  const startedAt = Date.parse(main.startedAt);
+  const calls: string[] = [];
+  const times = [startedAt + 20_000, startedAt + 21_000, startedAt + 22_000, startedAt + 23_000];
+  await runGuardedWatcherRecovery(main, buildWatcherRecoveryAuthorization(main, main.generation), {
+    now: () => times.shift()!,
+    terminate: async () => { calls.push("terminate"); },
+    confirmAbsent: async () => { calls.push("confirm-absent"); },
+    launch: async () => { calls.push("launch"); }
+  });
+  assert.deepEqual(calls, ["terminate", "confirm-absent", "launch"]);
 });
 
 test("watcher recovery cancels when Codex disappears or crosses the startup deadline", () => {

@@ -16,7 +16,7 @@ import {
 import { applyRuntimeOverride, verifyMicroRuntime } from "../runtime-override.js";
 import {
   createWatcherPolicyState,
-  DEFAULT_RECOVERY_STARTUP_MS,
+  DEFAULT_RECOVERY_COMPLETION_MS,
   evaluateWatcherPolicy,
   resumeWatcherPolicyState,
   type WatcherPolicyState
@@ -102,7 +102,7 @@ export function buildWatcherRecoveryAuthorization(
     expectedAppPath: main.installation.appPath,
     expectedExecutablePath: main.installation.executablePath,
     requireLiveProcess: true,
-    restartDeadline: startedAt + DEFAULT_RECOVERY_STARTUP_MS
+    restartDeadline: startedAt + DEFAULT_RECOVERY_COMPLETION_MS
   };
 }
 

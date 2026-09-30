@@ -32,9 +32,10 @@ Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existi
 
 The installed macOS watcher never launches a closed Codex app or restarts an
 established session. If it was already running when a new normal Codex process
-opened, it can perform one bridge-enabled recovery after a ten-second stability
-check and only while that exact process is less than 30 seconds old. The recovery
-is cancelled if Codex closes, is replaced, or crosses the deadline. Normal
+opened, it can begin one bridge-enabled recovery after a ten-second stability
+check and only while that exact process is less than 30 seconds old. Its guarded
+shutdown and relaunch must finish within 60 seconds of process start. The recovery
+is cancelled if Codex closes, is replaced, or crosses that deadline. Normal
 launches still provide recent task status/navigation and account usage through
 the [normal-launch fallback](DESKTOP_IPC.md) while renderer-only controls are
 temporarily unavailable.
