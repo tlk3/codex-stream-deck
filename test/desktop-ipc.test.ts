@@ -1,13 +1,74 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import test from "node:test";
+import { promisify } from "node:util";
 import { CodexDesktopIpcBridge, encodeIpcFrame, IpcFrameReader, projectIpcStatus } from "../src/codex-desktop-ipc.js";
 import { CodexMicroRendererBridge, DebugBridgeUnavailableError } from "../src/codex-micro-renderer-bridge.js";
 
 const threadId = "019fe6f4-531d-7542-b696-c95718d96a2d";
+const exec = promisify(execFile);
+
+test("recent task catalog excludes source subagents before limiting slots without filtering user titles", {
+  skip: process.platform !== "darwin" && "macOS catalog reader uses the system SQLite executable"
+}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "deck-catalog-"));
+  const path = join(dir, "ipc.sock");
+  const peers = new Set<net.Socket>();
+  const server = net.createServer(socket => {
+    peers.add(socket); socket.on("close", () => peers.delete(socket));
+    const reader = new IpcFrameReader();
+    socket.on("data", chunk => {
+      for (const message of reader.push(chunk)) {
+        const m = message as any;
+        if (m.method === "initialize") socket.write(encodeIpcFrame({ type: "response", method: "initialize",
+          requestId: m.requestId, resultType: "success", result: { clientId: "deck" } }));
+      }
+    });
+  });
+  try {
+    await exec("/usr/bin/sqlite3", [join(dir, "state_5.sqlite"), `
+      CREATE TABLE threads (id TEXT, name TEXT, title TEXT, recency_at_ms INTEGER,
+        archived INTEGER, preview TEXT, agent_path TEXT, source TEXT);
+      INSERT INTO threads VALUES
+        ('00000000-0000-0000-0000-000000000001',NULL,'Guardian Review',109,0,'present',NULL,'{"subagent":{"other":"guardian"}}'),
+        ('00000000-0000-0000-0000-000000000002',NULL,'Guardian Review',108,0,'present',NULL,'{"subagent":{"other":"guardian"}}'),
+        ('00000000-0000-0000-0000-000000000003',NULL,'Guardian Review',107,0,'present',NULL,'{"subagent":{"other":"guardian"}}'),
+        ('00000000-0000-0000-0000-000000000004',NULL,'Guardian Review',106,0,'present',NULL,'{"subagent":{"other":"guardian"}}'),
+        ('00000000-0000-0000-0000-000000000005',NULL,'Guardian Review',105,0,'present',NULL,'{"subagent":"thread_spawn"}'),
+        ('00000000-0000-0000-0000-000000000006',NULL,'Guardian Review',104,0,'present','/root/child','"cli"'),
+        ('00000000-0000-0000-0000-000000000007',NULL,'Guardian Review',103,0,'present',NULL,'"cli"'),
+        ('00000000-0000-0000-0000-000000000008',NULL,'User thread',102,0,'present',NULL,NULL),
+        ('00000000-0000-0000-0000-000000000009',NULL,'Legacy user thread',101,0,'present',NULL,'desktop');
+    `]);
+    await new Promise<void>(resolve => server.listen(path, resolve));
+    const source = `
+      import { CodexDesktopIpcBridge } from ${JSON.stringify(new URL("../src/codex-desktop-ipc.ts", import.meta.url).href)};
+      const bridge = new CodexDesktopIpcBridge(() => {}, {
+        socketPath: ${JSON.stringify(path)}, verifyApp: async () => {}
+      }, { read: async () => undefined, close() {} });
+      try { console.log(JSON.stringify((await bridge.refresh()).slots)); }
+      finally { bridge.close(); }
+    `;
+    const { stdout } = await exec(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
+      env: { ...process.env, CODEX_HOME: dir }, timeout: 10000
+    });
+    const slots = JSON.parse(stdout);
+    assert.deepEqual(slots.filter((slot: any) => slot.threadKey).map((slot: any) => [slot.threadKey, slot.title]), [
+      ["00000000-0000-0000-0000-000000000007", "Guardian Review"],
+      ["00000000-0000-0000-0000-000000000008", "User thread"],
+      ["00000000-0000-0000-0000-000000000009", "Legacy user thread"]
+    ]);
+    assert.equal(slots[0].status, "error", "missing live status must not be presented as healthy");
+  } finally {
+    for (const socket of peers) socket.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(dir, { recursive: true });
+  }
+});
 
 test("IPC frames survive fragmented and coalesced socket reads, reject oversized frames", () => {
   const reader = new IpcFrameReader();

@@ -94,7 +94,10 @@ async function readRecentThreads(): Promise<Thread[]> {
   let stdout: string;
   try {
     ({ stdout } = await exec("/usr/bin/sqlite3", ["-readonly", "-json", join(ROOT, "state_5.sqlite"),
-      "SELECT id, substr(COALESCE(name,title),1,240) AS title, recency_at_ms AS activityAt FROM threads WHERE archived=0 AND preview<>'' AND agent_path IS NULL ORDER BY recency_at_ms DESC,id DESC LIMIT 6;"
+      // Guardian reviews and other internal tasks can have no agent_path in
+      // newer Codex builds. Exclude their structured source before slot limits,
+      // without hiding real user chats that happen to share an internal title.
+      "SELECT id, substr(COALESCE(name,title),1,240) AS title, recency_at_ms AS activityAt FROM threads WHERE archived=0 AND preview<>'' AND agent_path IS NULL AND CASE WHEN json_valid(source) THEN json_type(source,'$.subagent') IS NULL ELSE 1 END ORDER BY recency_at_ms DESC,id DESC LIMIT 6;"
     ], { timeout: 2000, maxBuffer: 32768 }));
   } catch (error) {
     if (isTransientTaskCatalogOpenFailure(error)) throw new TransientTaskCatalogUnavailableError();

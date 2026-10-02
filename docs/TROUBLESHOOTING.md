@@ -40,6 +40,19 @@ launches still provide recent task status/navigation and account usage through
 the [normal-launch fallback](DESKTOP_IPC.md) while renderer-only controls are
 temporarily unavailable.
 
+macOS can restore Codex before login starts the watcher. If Codex is already
+older than the recovery window when the watcher first sees it, the watcher
+leaves that session open. Once active work finishes, use
+`./start-codex-deck.sh start --restart` to establish the renderer connection.
+A normal close and reopen can also be recovered when the watcher is already
+running. Installing the watcher during an open session does not establish that
+connection by itself.
+
+Recent Codex builds put the native event bus in `app-shared` renderer chunks.
+Use a launcher that discovers those chunks if logs repeatedly report
+`nativeEventBus:false` while enabling Micro; repeatedly restarting the old
+launcher cannot repair that discovery failure.
+
 ## Dials show Unavailable although task status works
 
 `local=ready` means the task transport is connected, not that every desktop
@@ -76,6 +89,11 @@ Then install the launcher from the newest release. This command does not start, 
 The native handler was unavailable or the action is not valid in the current composer state. Check that the relevant function is assigned in **Codex Settings > Codex Micro** and that the intended Codex window/composer is active.
 
 ## Agent assignments are unexpected
+
+The normal-launch recent-task fallback excludes internal subagent sources,
+including automatic Guardian reviews, even when Codex gives them no agent path.
+User chats remain eligible regardless of their title. A warning on a remaining
+chat can mean its live status has not arrived; it does not prove the chat failed.
 
 Codex Deck does not choose the six native tasks. Open **Codex Settings > Codex Micro > Agent keys** and select pinned, recently updated, priority, or custom assignments. For combined Pinned or Individual assignments, select the same mode in both Codex apps. Pinned tasks are interleaved between hosts; in Individual mode the Stream Deck computer wins a conflicting slot and the remote host fills empty slots. Both lists are de-duplicated, and mirrored tasks route to the host owning the exact local rollout filename.
 

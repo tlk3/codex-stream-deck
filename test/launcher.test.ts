@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 
 async function evaluateRuntimeExpression(
   expression: string,
-  options: { statsig?: unknown; settingsLink?: boolean; inputHandlers?: boolean } = {}
+  options: { statsig?: unknown; settingsLink?: boolean; inputHandlers?: boolean; sharedChunk?: boolean } = {}
 ): Promise<{ result: Record<string, unknown>; messages: unknown[] }> {
   const messages: unknown[] = [];
   const handlers = new Map<string, Set<unknown>>([
@@ -28,14 +28,14 @@ async function evaluateRuntimeExpression(
     .replaceAll("await import(url)", "await globalThis.__codexDeckImport(url)");
   const result = await runInNewContext(executable, {
     __STATSIG__: options.statsig,
-    __codexDeckImport: async () => ({ bus }),
+    __codexDeckImport: async (url: string) => options.sharedChunk && !url.includes('/app-shared-') ? {} : ({ bus }),
     document: {
       querySelector(selector: string) {
         return selector === '[href*="/settings/codex-micro"]' && options.settingsLink ? {} : null;
       },
       querySelectorAll(selector: string) {
         if (selector === "[href*=\"/settings/codex-micro\"]") return options.settingsLink ? [{}] : [];
-        return [{ href: "app://-/assets/codex-micro-current.js", src: "" }];
+        return [{ href: options.sharedChunk ? "app://-/assets/app-shared-current.js" : "app://-/assets/codex-micro-current.js", src: "" }];
       }
     },
     performance: { getEntriesByType: () => [] },
@@ -130,6 +130,17 @@ test("runtime activation uses native Micro handlers when legacy Statsig is unava
   const verification = await evaluateRuntimeExpression(buildRuntimeVerificationExpression());
   assert.equal(verification.result.ready, true);
   assert.equal(verification.result.nativeEventBus, true);
+  assert.equal(verification.result.hidHandlers, 1);
+  assert.equal(verification.result.joystickHandlers, 1);
+});
+
+test("activation and verification discover the native bus after Codex moves it into app-shared", async () => {
+  const activation = await evaluateRuntimeExpression(buildRuntimeOverrideExpression(), { sharedChunk: true });
+  assert.equal(activation.result.ready, true);
+  assert.equal(activation.result.nativeEventBus, true);
+  assert.equal(activation.messages.length, 1);
+  const verification = await evaluateRuntimeExpression(buildRuntimeVerificationExpression(), { sharedChunk: true });
+  assert.equal(verification.result.ready, true);
   assert.equal(verification.result.hidHandlers, 1);
   assert.equal(verification.result.joystickHandlers, 1);
 });
