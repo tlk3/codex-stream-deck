@@ -386,6 +386,7 @@
     let catalogRevision = -1;
     let catalogRequestGeneration = 0;
     let modelPresetRows = [];
+    let modelPresetRenderSignature;
     let seededModelPresets = false;
     let draggedModelPreset = -1;
 
@@ -585,7 +586,15 @@
       return availablePairs().find((entry) => !used.has(`${entry.modelId}\n${entry.reasoningEffort}`));
     }
 
-    function renderModelPresetItems() {
+    function renderModelPresetItems(force = false) {
+      // Snapshot generations and settings echoes change frequently, but replacing
+      // unchanged selects closes their native dropdown while the user is choosing.
+      const signature = JSON.stringify({
+        rows: modelPresetRows, catalog: modelCatalog,
+        includeUltra: element("include-ultra").checked
+      });
+      if (!force && signature === modelPresetRenderSignature) return;
+      modelPresetRenderSignature = signature;
       const container = element("model-preset-items");
       container.replaceChildren();
       modelPresetRows.forEach((entry, index) => {
@@ -674,7 +683,7 @@
               rowEntry.modelId === model.value && rowEntry.reasoningEffort === value));
           if (!candidate) {
             element("model-editor-status").textContent = "That model's available pairs are already configured; duplicate preset refused.";
-            renderModelPresetItems();
+            renderModelPresetItems(true);
             return;
           }
           modelPresetRows[index] = { modelId: model.value, reasoningEffort: candidate };
@@ -686,10 +695,11 @@
           if (modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
               rowEntry.modelId === candidate.modelId && rowEntry.reasoningEffort === candidate.reasoningEffort)) {
             element("model-editor-status").textContent = "That model and reasoning pair is already configured; duplicate preset refused.";
-            renderModelPresetItems(); return;
+            renderModelPresetItems(true); return;
           }
           modelPresetRows[index] = candidate;
           element("model-editor-status").textContent = "";
+          renderModelPresetItems();
           persistAndQueue(true);
         });
         const buttons = document.createElement("span");

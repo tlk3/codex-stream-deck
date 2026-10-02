@@ -522,6 +522,65 @@ test("authoritative catalog seeds preferred pairs and editor persists complete u
   assert.equal(modelPresetRows(document).length, 3);
 });
 
+test("model preset dropdowns survive background snapshots and unchanged settings echoes", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"), customized: true,
+    modelPresets: [{ modelId: "gpt-5.6-sol", reasoningEffort: "high" }]
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect("24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ payload: { settings } }));
+  const socket = sockets[0]!;
+  socket.open();
+  const catalog = {
+    kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+    hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+    activeModelId: "gpt-5.6-sol", activeModelDisplayName: "5.6 Sol", reasoningEffort: "high",
+    modelCatalog: MODEL_CATALOG
+  };
+  socket.message({ event: "sendToPropertyInspector", payload: catalog });
+  const selects = () => modelPresetRows(document)[0]!.descendants()
+    .filter(({ tagName }) => tagName === "SELECT");
+  const [model, effort] = selects();
+  for (let revision = 2; revision <= 5; revision += 1) {
+    socket.message({ event: "sendToPropertyInspector", payload: {
+      ...catalog, catalogRevision: revision, snapshotGeneration: revision,
+      hostId: "host-b", reasoningEffort: "medium"
+    } });
+    socket.message({ event: "didReceiveSettings", payload: { settings } });
+    assert.equal(selects()[0], model, "model dropdown must not be detached on background refresh");
+    assert.equal(selects()[1], effort, "reasoning dropdown must not be detached on background refresh");
+  }
+  assert.match(field(document, "model-catalog-status").textContent, /host-b/);
+
+  effort!.value = "medium";
+  effort!.dispatch("change");
+  const afterEdit = selects();
+  const saved = decodedMessages(socket).at(-1)!.payload;
+  socket.message({ event: "didReceiveSettings", payload: { settings: saved } });
+  assert.equal(selects()[0], afterEdit[0], "save echo must not detach the next opened model dropdown");
+  assert.equal(selects()[1], afterEdit[1], "save echo must not detach the next opened reasoning dropdown");
+  assert.equal(selects()[1]!.value, "medium");
+
+  socket.message({ event: "sendToPropertyInspector", payload: {
+    ...catalog, catalogRevision: 6, modelCatalog: [...MODEL_CATALOG, {
+      modelId: "gpt-new", displayName: "New model", supportedReasoningEfforts: ["medium", "high"]
+    }]
+  } });
+  assert.ok(selects()[0]!.options.some(({ value }) => value === "gpt-new"), "real catalog changes still update options");
+  socket.message({ event: "sendToPropertyInspector", payload: {
+    kind: "model-catalog", requestGeneration: 1, catalogRevision: 7, available: false
+  } });
+  assert.equal(selects()[0]!.disabled, true);
+  assert.equal(selects()[1]!.disabled, true);
+  const offlineSelects = selects();
+  socket.message({ event: "sendToPropertyInspector", payload: {
+    kind: "model-catalog", requestGeneration: 1, catalogRevision: 8, available: false
+  } });
+  assert.equal(selects()[0], offlineSelects[0]);
+  assert.equal(selects()[1], offlineSelects[1]);
+});
+
 test("model preset catalog ordering is monotonic and saved unknown or Ultra rows survive offline filtering", async () => {
   const settings = {
     ...expandDialPreset("model-presets"),
