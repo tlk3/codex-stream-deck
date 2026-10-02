@@ -286,6 +286,11 @@ function createModelPresetHarness(options: {
       tail = tail.return;
     }
   }
+  // A real selector is below its QueryClientProvider, rather than in a
+  // disconnected test-only fiber tree.
+  let providerTail = componentFiber;
+  while (providerTail.return) providerTail = providerTail.return;
+  providerTail.return = root.__reactContainer$modelPreset;
   trigger = {
     isConnected: true,
     getClientRects: () => ({ length: options.hiddenTrigger ? 0 : 1 }),
@@ -663,6 +668,80 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
   assert.deepEqual(read([
     { ...trigger, visible: false }, trigger
   ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
+});
+
+test("active selector catalog survives a conversation larger than the root traversal budget", () => {
+  const queryClient = new ReasoningQueryClientFixture([[['models', 'list'], { data: [{
+    displayName: "GPT-6.1-Sol", model: "gpt-6.1-sol",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }]
+  }] }]]);
+  let ancestor: Record<string, unknown> = { memoizedProps: { value: queryClient }, return: null };
+  for (let index = 0; index < 313; index += 1) {
+    let context: unknown = null;
+    for (let dep = 0; dep < 8; dep += 1) context = { memoizedValue: {}, next: context };
+    ancestor = { return: ancestor, dependencies: { firstContext: context } };
+  }
+  let oversizedRoot: Record<string, unknown> = { memoizedProps: { value: queryClient } };
+  for (let index = 0; index < 30_001; index += 1) oversizedRoot = { child: oversizedRoot };
+  const trigger: { getAttribute(name: string): string | null; querySelectorAll?: () => unknown[];
+    "__reactFiber$live": Record<string, unknown> } = {
+    "__reactFiber$live": ancestor,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "high"
+    })[name] ?? null
+  };
+  trigger.querySelectorAll = () => [{
+    textContent: "GPT-6.1 Sol", children: [], parentElement: trigger, getAttribute: () => null
+  }];
+  assert.deepEqual(microBridgeModule.readActiveReasoningMetadata([trigger], oversizedRoot, () => true, () => false), {
+    currentEffort: "high", modelId: "gpt-6.1-sol", modelDisplayName: "6.1 Sol",
+    supportedEfforts: ["medium", "high"],
+    modelCatalog: [{ modelId: "gpt-6.1-sol", displayName: "6.1 Sol", supportedReasoningEfforts: ["medium", "high"] }]
+  });
+  const ambiguous = { ...trigger, "__reactFiber$other": ancestor };
+  assert.equal(microBridgeModule.readActiveReasoningMetadata([ambiguous], oversizedRoot, () => true, () => false), undefined);
+  let reads = 0;
+  const hostile = Object.defineProperty({ ...trigger }, "__reactFiber$live", {
+    get() { reads += 1; return ancestor; }
+  });
+  assert.equal(microBridgeModule.readActiveReasoningMetadata([hostile], oversizedRoot, () => true, () => false), undefined);
+  assert.equal(reads, 0);
+});
+
+test("selector ancestor discovery rejects cycles, exhausted paths and accessors", () => {
+  const client = new ReasoningQueryClientFixture([]);
+  const provider: Record<string, unknown> = { memoizedProps: { value: client }, return: null };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(provider, true), [client]);
+  provider.return = provider;
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(provider, true), []);
+  provider.return = null;
+  let deep: Record<string, unknown> = provider;
+  for (let index = 0; index < 511; index += 1) deep = { return: deep };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(deep, true), [client]);
+  provider.return = deep;
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(deep, true), [], "a cycle at the budget boundary is rejected");
+  provider.return = null;
+  deep = { return: deep };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(deep, true), []);
+  provider.return = 42;
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(provider, true), [], "a malformed ancestor cannot confer authority");
+  provider.return = null;
+  deep = provider;
+  for (let index = 0; index < 513; index += 1) deep = { return: deep };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(deep, true), []);
+  let reads = 0;
+  const hostile = { memoizedProps: { value: client }, get return() { reads += 1; return null; } };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(hostile, true), []);
+  assert.equal(reads, 0);
+  const unrelated = { return: provider, get child() { reads += 1; throw new Error("unrelated subtree"); },
+    get sibling() { reads += 1; throw new Error("unrelated subtree"); } };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients(unrelated, true), [client]);
+  assert.equal(reads, 0, "scoped lookup never enters unrelated conversation branches");
+  let context: unknown = null;
+  for (let index = 0; index < 8193; index += 1) context = { memoizedValue: client, next: context };
+  assert.deepEqual(microBridgeModule.findRendererQueryClients({ dependencies: { firstContext: context }, return: null }, true), []);
 });
 
 test("reasoning metadata resolves the live display-contents model leaf and ignores its effort sibling", () => {
@@ -1863,7 +1942,6 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
     assert.match(expression, /querySelectorAll\?\.\(["']\*["']\)/);
     assert.match(expression, /displayName/);
     assert.doesNotMatch(expression, /selectedValue/);
-    assert.match(expression, /seen\.size\s*<\s*(?:30000|3e4)/);
     assert.match(expression, /getQueriesData/);
     assert.match(expression, /structuredClone\(value\)/);
     assert.doesNotMatch(expression, /getQueryCache\(\)\.getAll\(\)/);
@@ -2427,7 +2505,7 @@ test("paired model preset selector accepts the current live 221-node React ances
 });
 
 test("paired model preset selector fails closed when the React ancestor traversal exceeds its bound", async () => {
-  const harness = createModelPresetHarness({ ancestorTailDepth: 256 });
+  const harness = createModelPresetHarness({ ancestorTailDepth: 512 });
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
   testBridge.ensureConnected = async () => {};
@@ -2436,6 +2514,21 @@ test("paired model preset selector fails closed when the React ancestor traversa
     modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
   }), /metadata|selector/i);
   assert.equal(harness.selectorCalls.length, 0);
+});
+
+test("paired model presets apply through the current deeply nested selector ancestry", async () => {
+  const harness = createModelPresetHarness({ ancestorTailDepth: 314 });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  await bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  });
+  assert.deepEqual(harness.selectorCalls, [["gpt-5.6-terra", "medium"]]);
 });
 
 test("paired model preset transport failures rotate the renderer guard namespace while metadata refusals preserve it", async () => {

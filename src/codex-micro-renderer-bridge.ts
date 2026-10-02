@@ -534,21 +534,25 @@ export function readVisibleReasoningModelLabels(
   } catch { return undefined; }
 }
 
-export function findRendererQueryClients(rootFiber: unknown): unknown[] {
+export function findRendererQueryClients(rootFiber: unknown, ancestorsOnly = false): unknown[] {
   try {
     const queue = [rootFiber];
     const seen = new Set<object>();
     const seenContexts = new Set<object>();
     const candidateClients = new Set<object>();
+    const fiberLimit = ancestorsOnly ? 512 : 30000;
+    const contextLimit = ancestorsOnly ? 8192 : 30000;
     let contextTraversalTruncated = false;
-    while (queue.length && seen.size < 30000) {
+    while (queue.length && seen.size < fiberLimit) {
       const value = queue.pop();
+      if (ancestorsOnly && value != null && typeof value !== "object") return [];
+      if (ancestorsOnly && value && typeof value === "object" && seen.has(value)) return [];
       if (!value || typeof value !== "object" || seen.has(value)) continue;
       seen.add(value);
       const memoizedPropsProperty = readOwnDataProperty(value, "memoizedProps");
       const dependenciesProperty = readOwnDataProperty(value, "dependencies");
-      const childProperty = readOwnDataProperty(value, "child");
-      const siblingProperty = readOwnDataProperty(value, "sibling");
+      const childProperty = readOwnDataProperty(value, ancestorsOnly ? "return" : "child");
+      const siblingProperty = ancestorsOnly ? { exists: false, value: undefined } : readOwnDataProperty(value, "sibling");
       if (!memoizedPropsProperty || !dependenciesProperty || !childProperty || !siblingProperty) return [];
       const contextValues: unknown[] = [];
       if (memoizedPropsProperty.exists && memoizedPropsProperty.value &&
@@ -564,7 +568,7 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
         if (!firstContextProperty) return [];
         dependency = firstContextProperty.value;
       }
-      while (dependency && typeof dependency === "object" && seenContexts.size < 30000 &&
+      while (dependency && typeof dependency === "object" && seenContexts.size < contextLimit &&
           !seenContexts.has(dependency)) {
         seenContexts.add(dependency);
         const memoizedValueProperty = readOwnDataProperty(dependency, "memoizedValue");
@@ -586,9 +590,9 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
       }
       queue.push(childProperty.value, siblingProperty.value);
     }
-    const fiberTraversalTruncated = queue.some((value) =>
-      value && typeof value === "object" && !seen.has(value)
-    );
+    const fiberTraversalTruncated = ancestorsOnly
+      ? queue.some((value) => value != null)
+      : queue.some((value) => value && typeof value === "object" && !seen.has(value));
     if (contextTraversalTruncated || fiberTraversalTruncated) return [];
     const queryClients: object[] = [];
     for (const candidate of candidateClients) {
@@ -780,7 +784,17 @@ export function readActiveReasoningMetadata(
     if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
     const visibleLabels = readVisibleReasoningModelLabels(trigger, isVisible, isExplicitlyHidden);
     if (!visibleLabels) return undefined;
-    const modelCatalog = readReasoningModelCatalog(findRendererQueryClients(reactRootFiber));
+    // Scope catalog discovery to the active selector's provider ancestry. Large
+    // conversations can exhaust a whole-root scan despite a valid local provider.
+    const fiberKeys = Object.getOwnPropertyNames(trigger).filter((key) => key.startsWith("__reactFiber$"));
+    if (fiberKeys.length > 1) return undefined;
+    const fiberProperty = fiberKeys.length === 1 ? readOwnDataProperty(trigger, fiberKeys[0]!) : undefined;
+    if (fiberKeys.length === 1 && (!fiberProperty?.exists || !fiberProperty.value ||
+        typeof fiberProperty.value !== "object")) return undefined;
+    const queryClients = fiberProperty
+      ? findRendererQueryClients(fiberProperty.value, true)
+      : findRendererQueryClients(reactRootFiber);
+    const modelCatalog = readReasoningModelCatalog(queryClients);
     const match = modelCatalog && matchActiveReasoningModel(visibleLabels, modelCatalog);
     return match && match.supportedReasoningEfforts.includes(currentEffort) ? {
       currentEffort,
@@ -921,7 +935,7 @@ export function readModelPresetSelector(
     const candidates: ModelPresetSelector[] = [];
     let fiber: unknown = fiberProperty.value;
     const seen = new Set<object>();
-    for (let depth = 0; fiber && typeof fiber === "object" && depth < 256; depth++) {
+    for (let depth = 0; fiber && typeof fiber === "object" && depth < 512; depth++) {
       if (seen.has(fiber as object)) return undefined;
       if (Object.getOwnPropertySymbols(fiber).length > 0) return undefined;
       seen.add(fiber as object);
