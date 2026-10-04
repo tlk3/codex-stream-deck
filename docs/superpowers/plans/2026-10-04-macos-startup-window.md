@@ -37,5 +37,13 @@
 - [x] Implement running-installation fast path and resume first-observation safety. Add transition-only decision diagnostics; update macOS behavior documentation.
 - [x] Run focused tests, `npm test`, `npm run check`, `npm run validate`, `npm run audit:release`, built launcher `self-test`; expected zero failures.
 - [x] Independent review of full task diff, repair any important findings with red/green regression tests.
-- [ ] Commit exact task files, push existing PR branch, back up and install watcher runtime; verify unchanged Codex PID and fast observations.
-- [ ] Update existing PR with verified checks and current-session restart limitation. Hand off the exact explicit restart command.
+- [x] Commit exact task files, push existing PR branch, back up and install watcher runtime; verify unchanged Codex PID and fast observations.
+- [x] Update existing PR with verified checks and current-session restart limitation. Hand off the exact explicit restart command.
+
+Implementation and watcher installation complete in `9b7a079`. Current-session
+renderer restoration and the next real reboot remain pending, not claimed
+verified. After active work finishes, the explicit restart command is:
+
+```sh
+/opt/homebrew/bin/node "/Users/TLK3/Library/Application Support/CodexDeck/codex-deck-macos.mjs" start --restart
+```
