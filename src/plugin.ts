@@ -46,5 +46,11 @@ for (const pluginAction of [
 streamDeck.connect();
 void controller.start().catch((error) => streamDeck.logger.error(`Codex-Verbindung fehlgeschlagen: ${String(error)}`));
 
-process.once("SIGTERM", () => controller.stop());
-process.once("SIGINT", () => controller.stop());
+const shutdown = (): void => {
+  controller.stop();
+  // The Stream Deck SDK socket can keep Node alive after polling has stopped.
+  // Exit so Stream Deck can replace this process during a plugin reload.
+  process.exit(0);
+};
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);

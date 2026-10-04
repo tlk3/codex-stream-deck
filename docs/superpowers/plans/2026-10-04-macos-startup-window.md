@@ -45,5 +45,5 @@ renderer restoration and the next real reboot remain pending, not claimed
 verified. After active work finishes, the explicit restart command is:
 
 ```sh
-/opt/homebrew/bin/node "/Users/TLK3/Library/Application Support/CodexDeck/codex-deck-macos.mjs" start --restart
+node "$HOME/Library/Application Support/CodexDeck/codex-deck-macos.mjs" start --restart
 ```
