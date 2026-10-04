@@ -125,11 +125,6 @@ function plistValue(infoPath: string, key: string): string {
   return run("/usr/bin/plutil", ["-extract", key, "raw", "-o", "-", infoPath]);
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  try { return (await stat(path)).isDirectory(); }
-  catch { return false; }
-}
-
 function parseProcessRows(output: string): Array<{ pid: number; ppid: number; startedAt: string; command: string }> {
   const rows: Array<{ pid: number; ppid: number; startedAt: string; command: string }> = [];
   const pattern = /^\s*(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
@@ -185,35 +180,57 @@ async function standardAppCandidates(): Promise<string[]> {
 
 export async function discoverCodexInstallation(): Promise<CodexInstallation> {
   if (platform() !== "darwin") throw new Error("The macOS launcher only runs on macOS.");
-  const candidates: string[] = [];
-  if (process.env.CODEX_DECK_APP_PATH) candidates.push(resolve(process.env.CODEX_DECK_APP_PATH));
+  const runningPaths = processRows().filter((row) => row.ppid === 1)
+    .map((row) => appPathFromExecutable(row.command)).filter((path): path is string => path != null);
+  return await selectCodexInstallation(runningPaths, installationFromApp, async () => {
+    const candidates: string[] = [];
+    if (process.env.CODEX_DECK_APP_PATH) candidates.push(resolve(process.env.CODEX_DECK_APP_PATH));
+    const spotlight = run("/usr/bin/mdfind", [`kMDItemCFBundleIdentifier == '${CODEX_BUNDLE_ID}'`], { allowFailure: true });
+    if (spotlight) candidates.push(...spotlight.split("\n").filter((path) => path.endsWith(".app")));
+    candidates.push(...await standardAppCandidates());
+    return candidates;
+  });
+}
 
-  for (const row of processRows()) {
-    if (row.ppid !== 1) continue;
-    const appPath = appPathFromExecutable(row.command);
-    if (appPath) candidates.push(appPath);
-  }
+export async function selectCodexInstallation(
+  runningAppPaths: string[],
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null>,
+  fallbackAppPaths: () => Promise<string[]>
+): Promise<CodexInstallation> {
+  const running = await selectNewestInstallation(runningAppPaths, readInstallation);
+  // A validated running installation already outranks every stopped app.
+  // Never spend a startup recovery window on Spotlight/all-app enumeration.
+  if (running) return running;
+  const visited = new Set(runningAppPaths);
+  const fallback = await selectNewestInstallation(
+    (await fallbackAppPaths()).filter((path) => !visited.has(path)), readInstallation
+  );
+  if (!fallback) throw new Error(`No installed Codex app with bundle identifier ${CODEX_BUNDLE_ID} was found.`);
+  return fallback;
+}
 
-  const spotlight = run("/usr/bin/mdfind", [`kMDItemCFBundleIdentifier == '${CODEX_BUNDLE_ID}'`], { allowFailure: true });
-  if (spotlight) candidates.push(...spotlight.split("\n").filter((path) => path.endsWith(".app")));
-  candidates.push(...await standardAppCandidates());
-
+async function selectNewestInstallation(
+  appPaths: string[],
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null>
+): Promise<CodexInstallation | null> {
   const installations: CodexInstallation[] = [];
-  for (const candidate of [...new Set(candidates)]) {
-    if (!await isDirectory(candidate)) continue;
-    const installation = await installationFromApp(candidate);
+  for (const candidate of new Set(appPaths)) {
+    const installation = await readInstallation(candidate);
     if (installation) installations.push(installation);
   }
-  if (installations.length === 0) {
-    throw new Error(`No installed Codex app with bundle identifier ${CODEX_BUNDLE_ID} was found.`);
-  }
+  installations.sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true }));
+  return installations[0] ?? null;
+}
 
-  const runningPaths = new Set(processRows().filter((row) => row.ppid === 1).map((row) => appPathFromExecutable(row.command)));
-  installations.sort((left, right) => {
-    const running = Number(runningPaths.has(right.appPath)) - Number(runningPaths.has(left.appPath));
-    return running || right.version.localeCompare(left.version, undefined, { numeric: true });
-  });
-  return installations[0]!;
+export async function observeRunningCodex(
+  rows = processRows(),
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null> = installationFromApp
+): Promise<{ installation: CodexInstallation | null; main: MainProcess | null }> {
+  const runningPaths = rows.filter((row) => row.ppid === 1)
+    .map((row) => appPathFromExecutable(row.command)).filter((path): path is string => path != null);
+  const installation = await selectNewestInstallation(runningPaths, readInstallation);
+  const main = installation ? findMainProcessInRows(installation, rows) : null;
+  return main ? { installation, main } : { installation: null, main: null };
 }
 
 function findMainProcessInRows(installation: CodexInstallation, rows: ReturnType<typeof processRows>): MainProcess | null {
@@ -649,16 +666,29 @@ async function runWatcher(): Promise<number> {
   await log("Watcher started.");
   let policy = resumeWatcherPolicyState(await readJson<WatcherPolicyState>(WATCHER_STATE_PATH));
   let enabledSignature = "";
+  let decisionSignature = "";
+  let previousObservationAt: number | null = null;
   try {
     while (true) {
       try {
-        const installation = await discoverCodexInstallation();
-        const main = findMainProcess(installation);
+        // Closed-app observations must not wait for Spotlight or stopped apps.
+        const { installation, main } = await observeRunningCodex();
         const port = await healthyDebugPort(main);
+        const now = Date.now();
+        const startedAt = main ? parseProcessStartedAt(main.startedAt) : null;
         const decision = evaluateWatcherPolicy(policy, {
-          now: Date.now(), generation: main?.generation ?? null, bridgeHealthy: port != null,
-          startedAt: main ? parseProcessStartedAt(main.startedAt) : null
+          now, generation: main?.generation ?? null, bridgeHealthy: port != null, startedAt
         });
+        const nextDecisionSignature = JSON.stringify([decision.action, main?.generation ?? null]);
+        if (nextDecisionSignature !== decisionSignature) {
+          await log(`Watcher decision: ${JSON.stringify({
+            ...decision.action, pid: main?.pid ?? null,
+            processAgeMs: startedAt == null ? null : now - startedAt,
+            observationIntervalMs: previousObservationAt == null ? null : now - previousObservationAt
+          })}`);
+          decisionSignature = nextDecisionSignature;
+        }
+        previousObservationAt = now;
         policy = decision.state;
         await atomicWriteJson(WATCHER_STATE_PATH, policy);
 
@@ -690,7 +720,7 @@ async function runWatcher(): Promise<number> {
             if (relayConfig?.enabled) {
               relayServer = new CodexRelayServer(
                 relayConfig,
-                { ...identity, platform: "darwin", codexVersion: installation.version },
+                { ...identity, platform: "darwin", codexVersion: installation?.version },
                 relayControl, safeLog
               );
               await relayServer.start();
@@ -698,7 +728,7 @@ async function runWatcher(): Promise<number> {
             if (mobileLocalConfig?.enabled) {
               mobileLocalRelayServer = new CodexRelayServer(
                 mobileLocalConfig,
-                { ...identity, platform: "darwin", codexVersion: installation.version }, relayControl,
+                { ...identity, platform: "darwin", codexVersion: installation?.version }, relayControl,
                 (message) => safeLog(`Nearby mobile relay: ${message}`)
               );
               await mobileLocalRelayServer.start();
@@ -707,7 +737,7 @@ async function runWatcher(): Promise<number> {
           relaySignature = nextRelaySignature;
         }
         const relayHost = {
-          ...await hostState(), platform: "darwin" as const, codexVersion: installation.version
+          ...await hostState(), platform: "darwin" as const, codexVersion: installation?.version
         };
         relayServer?.updateHost(relayHost);
         mobileLocalRelayServer?.updateHost(relayHost);
@@ -715,7 +745,7 @@ async function runWatcher(): Promise<number> {
         if (port != null) {
           const signature = `${main!.generation}:${port}`;
           if (signature !== enabledSignature) {
-            const result = await enableBridge(installation, port);
+            const result = await enableBridge(installation!, port);
             enabledSignature = signature;
             await log(`Reused healthy loopback bridge on port ${port}: ${JSON.stringify(result.verification)}`);
           }

@@ -14,16 +14,85 @@ import {
   buildCodexRestartHandoffSpec,
   buildLaunchAgentPlist,
   buildWatcherLaunchScript,
+  observeRunningCodex,
   parseDebugPort,
   parseProcessStartedAt,
   runExclusiveRestartHandoff,
   runGuardedWatcherRecovery,
+  selectCodexInstallation,
   selectLaunchAgentNodePath,
   spawnDetachedRestartHandoff
 } from "../launcher/macos/codex-deck-macos.js";
 import { codexDeckStateRoot } from "../src/codex-deck-paths.js";
 
 const execFile = promisify(execFileCallback);
+
+const installationFixture = (appPath: string, version = "1.0") => ({
+  appPath, version, bundleId: "com.openai.codex", buildVersion: "123",
+  executableName: "ChatGPT", executablePath: `${appPath}/Contents/MacOS/ChatGPT`
+});
+
+test("running renamed Codex is discovered without scanning unrelated installed applications", async () => {
+  const codex = installationFixture("/Applications/Unexpected Name.app");
+  const selected = await selectCodexInstallation(
+    ["/Applications/Other.app", codex.appPath, codex.appPath],
+    async (path) => path === codex.appPath ? codex : null,
+    async () => { throw new Error("full scan must not run when Codex is already identified"); }
+  );
+  assert.deepEqual(selected, codex);
+});
+
+test("multiple running Codex installations prefer the newest numeric version", async () => {
+  const old = installationFixture("/Applications/Old.app", "1.9");
+  const current = installationFixture("/Applications/New.app", "1.10");
+  const selected = await selectCodexInstallation(
+    [old.appPath, current.appPath],
+    async (path) => path === old.appPath ? old : current,
+    async () => { throw new Error("running installations do not need fallback"); }
+  );
+  assert.equal(selected.appPath, "/Applications/New.app");
+});
+
+test("discovery falls back when running candidates are not valid Codex installations", async () => {
+  const old = installationFixture("/Applications/Old.app", "1.9");
+  const current = installationFixture("/Applications/Codex.app", "1.10");
+  const selected = await selectCodexInstallation(
+    ["/Applications/Other.app"],
+    async (path) => path === old.appPath ? old : path === current.appPath ? current : null,
+    async () => [old.appPath, current.appPath]
+  );
+  assert.equal(selected.appPath, "/Applications/Codex.app");
+});
+
+test("discovery rejects absent or invalid installations instead of inventing a launch target", async () => {
+  await assert.rejects(selectCodexInstallation([], async () => null, async () => []), /No installed Codex app/);
+});
+
+test("closed-app watcher observation never scans stopped installations", async () => {
+  const result = await observeRunningCodex([
+    { pid: 100, ppid: 1, startedAt: "Sun Oct  4 07:55:38 2026", command: "/usr/bin/daemon" },
+    { pid: 200, ppid: 100, startedAt: "Sun Oct  4 07:55:38 2026", command: "/Applications/Codex.app/Contents/MacOS/ChatGPT" }
+  ], async () => { throw new Error("No main app exists; no installed-app lookup should run"); });
+  assert.deepEqual(result, { installation: null, main: null });
+});
+
+test("watcher observes the actual running Codex generation without fallback discovery", async () => {
+  const codex = installationFixture("/Applications/Renamed.app");
+  const row = { pid: 200, ppid: 1, startedAt: "Sun Oct  4 07:55:38 2026", command: `${codex.executablePath} --example` };
+  const result = await observeRunningCodex([row], async (path) => {
+    assert.equal(path, "/Applications/Renamed.app");
+    return codex;
+  });
+  assert.deepEqual(result.installation, codex);
+  assert.equal(result.main?.generation, "200:Sun Oct  4 07:55:38 2026:/Applications/Renamed.app/Contents/MacOS/ChatGPT");
+});
+
+test("watcher rejects unrelated main apps without performing stopped-app discovery", async () => {
+  const result = await observeRunningCodex([
+    { pid: 200, ppid: 1, startedAt: "Sun Oct  4 07:55:38 2026", command: "/Applications/Other.app/Contents/MacOS/Other" }
+  ], async () => null);
+  assert.deepEqual(result, { installation: null, main: null });
+});
 
 test("macOS launcher uses LaunchServices and passes loopback-only CDP arguments", () => {
   const spec = buildCodexLaunchSpec({ appPath: "/Applications/Unexpected Codex Name.app" }, 43123);

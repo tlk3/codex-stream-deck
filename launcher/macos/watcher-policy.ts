@@ -22,6 +22,7 @@ export type WatcherPolicyState = {
   recoveryCooldownUntil: number;
   unbridgedGeneration: string | null;
   unbridgedSince: number | null;
+  startupRecoveryGeneration: string | null;
   recoveryAttempts: string[];
 };
 
@@ -43,6 +44,7 @@ export function createWatcherPolicyState(now = Date.now()): WatcherPolicyState {
     recoveryCooldownUntil: 0,
     unbridgedGeneration: null,
     unbridgedSince: null,
+    startupRecoveryGeneration: null,
     recoveryAttempts: []
   };
 }
@@ -54,12 +56,18 @@ export function resumeWatcherPolicyState(
   if (!stored) return createWatcherPolicyState(now);
   return {
     ...stored,
+    // Persisted history is not an observation by this watcher instance.
+    // Its first live observation must preserve any already-running session.
+    initialized: false,
+    lastGeneration: null,
+    suppressedInitialGeneration: null,
     startupGraceUntil: now + DEFAULT_STARTUP_GRACE_MS,
     stoppedSince: null,
-    recoveryPendingUntil: Math.max(Number(stored.recoveryPendingUntil) || 0, now + DEFAULT_STARTUP_GRACE_MS),
+    recoveryPendingUntil: Number(stored.recoveryPendingUntil) || 0,
     recoveryCooldownUntil: Number(stored.recoveryCooldownUntil) || 0,
     unbridgedGeneration: null,
     unbridgedSince: null,
+    startupRecoveryGeneration: null,
     recoveryAttempts: [...(stored.recoveryAttempts ?? [])].slice(-16)
   };
 }
@@ -96,6 +104,7 @@ export function evaluateWatcherPolicy(
     next.suppressedInitialGeneration = null;
     next.unbridgedGeneration = null;
     next.unbridgedSince = null;
+    next.startupRecoveryGeneration = null;
     return { state: next, action: { type: "wait", reason: "codex-not-running" } };
   }
 
@@ -104,6 +113,8 @@ export function evaluateWatcherPolicy(
   const generationChanged = previousGeneration != null && previousGeneration !== generation;
   next.lastGeneration = generation;
   next.stoppedSince = null;
+  if (observedStoppedInterval) next.startupRecoveryGeneration = generation;
+  else if (generationChanged) next.startupRecoveryGeneration = null;
 
   if (bridgeHealthy) {
     next.hadHealthyBridge = true;
@@ -111,6 +122,7 @@ export function evaluateWatcherPolicy(
     next.suppressedInitialGeneration = null;
     next.unbridgedGeneration = null;
     next.unbridgedSince = null;
+    next.startupRecoveryGeneration = null;
     return { state: next, action: { type: "reuse-bridge" } };
   }
 
@@ -141,7 +153,8 @@ export function evaluateWatcherPolicy(
     return { state: next, action: { type: "wait", reason: "confirm-stable-unbridged-generation" } };
   }
   const processAge = typeof startedAt === "number" && Number.isFinite(startedAt) ? now - startedAt : Infinity;
-  const startupRecoveryEligible = generation !== next.suppressedInitialGeneration &&
+  const startupRecoveryEligible = generation === next.startupRecoveryGeneration &&
+    generation !== next.suppressedInitialGeneration &&
     processAge >= 0 && processAge <= DEFAULT_RECOVERY_TRIGGER_MS &&
     now >= next.recoveryCooldownUntil && !next.recoveryAttempts.includes(generation);
   if (startupRecoveryEligible) {

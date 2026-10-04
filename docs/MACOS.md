@@ -55,9 +55,13 @@ chmod +x start-codex-deck.sh "Start Codex Deck.command"
 ./start-codex-deck.sh install
 ```
 
-`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It leaves a normal Codex session already open during installation untouched and never launches Codex while the app is closed. When the running watcher observes a newly opened normal Codex process, it waits ten seconds for that exact process to stabilize, then starts at most one bridge-enabled recovery while the process is still less than 30 seconds old. The guarded shutdown and relaunch must finish within 60 seconds of that process start. The recovery is pinned to that process generation, app, and executable; it is cancelled if the process closes, is replaced, or crosses the completion deadline. Established sessions are never restarted in the background. Task status and usage remain available through the normal-launch fallback whenever renderer-only controls are unavailable.
+`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It leaves a normal Codex session already open during installation untouched and never launches Codex while the app is closed. After observing Codex closed, when the running watcher observes a newly opened normal Codex process, it waits ten seconds for that exact process to stabilize, then starts at most one bridge-enabled recovery while the process is still less than 30 seconds old. The guarded shutdown and relaunch must finish within 60 seconds of that process start. The recovery is pinned to that process generation, app, and executable; it is cancelled if the process closes, is replaced, or crosses the completion deadline. Established sessions and replacements without an observed closed interval are never restarted in the background. Task status and usage remain available through the normal-launch fallback whenever renderer-only controls are unavailable.
 
 Update by extracting the new launcher and running `install` again. The stable host identity, optional relay configuration, and user-owned icons are preserved.
+
+The watcher validates only running app bundles; it never delays a closed-app observation with Spotlight or installed-app scans. Explicit launcher commands retain fallback installation discovery. Restarting the watcher preserves any normal Codex session already present on its first observation, even a recently opened one. Stored recovery deadlines and cooldown remain in effect, but watcher startup does not add a new recovery delay. If macOS restores Codex before the watcher can observe it closed, renderer controls still require the explicit `start --restart` command below, after active work finishes.
+
+`watcher.log` records decision transitions, process age, and observation intervals. This distinguishes a preserved existing session from a missed startup window without logging thread contents or emitting a line every second.
 
 ## Commands
 
